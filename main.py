@@ -1,297 +1,730 @@
+"""
+PROSPECTA FIM — Backend API
+Núcleo de Finanças Insper
+
+Deploy: Railway
+Stack: FastAPI + PostgreSQL + APScheduler
+Roda o batimento de cotas todo dia às 18h (horário de Brasília)
+e expõe uma API REST que o Hub HTML consome.
+"""
+
+import os
+import json
+import logging
+from datetime import date, datetime, timedelta
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import psycopg2
 import requests
+import yfinance as yf
+from apscheduler.schedulers.background import BackgroundScheduler
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from psycopg2.extras import RealDictCursor
 
-BASE_URL = "https://web-production-5cacc.up.railway.app"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-COTAS = [
-    ("2025-04-30", 1.0, 10000000.0, None),
-    ("2025-05-02", 0.999179, 9991786.66, -0.00082133),
-    ("2025-05-05", 1.003056, 10030563.78, 0.0038809),
-    ("2025-05-06", 1.00709, 10070899.49, 0.00402128),
-    ("2025-05-07", 1.007276, 10072756.67, 0.00018441),
-    ("2025-05-08", 1.003216, 10032161.41, -0.0040302),
-    ("2025-05-09", 1.003501, 10035006.7, 0.00028362),
-    ("2025-05-12", 1.003696, 10036964.19, 0.00019507),
-    ("2025-05-13", 1.005059, 10050587.94, 0.00135736),
-    ("2025-05-14", 1.002979, 10029785.79, -0.00206974),
-    ("2025-05-15", 1.008628, 10086284.45, 0.00563309),
-    ("2025-05-16", 1.008328, 10083282.37, -0.00029764),
-    ("2025-05-19", 1.010596, 10105955.94, 0.00224863),
-    ("2025-05-20", 1.015271, 10152705.13, 0.0046259),
-    ("2025-05-21", 1.011452, 10114522.31, -0.00376085),
-    ("2025-05-22", 1.012983, 10129831.31, 0.00151357),
-    ("2025-05-23", 1.015351, 10153505.97, 0.00233712),
-    ("2025-05-26", 1.017026, 10170263.89, 0.00165046),
-    ("2025-05-27", 1.016155, 10161548.6, -0.00085694),
-    ("2025-05-28", 1.017278, 10172784.28, 0.00110571),
-    ("2025-05-29", 1.017329, 10173288.85, 4.96e-05),
-    ("2025-05-30", 1.018064, 10180641.37, 0.00072273),
-    ("2025-06-02", 1.020421, 10204207.82, 0.00231483),
-    ("2025-06-03", 1.019407, 10194068.99, -0.00099359),
-    ("2025-06-04", 1.021304, 10213036.73, 0.00186066),
-    ("2025-06-05", 1.018268, 10182676.83, -0.00297266),
-    ("2025-06-06", 1.014595, 10145954.65, -0.00360634),
-    ("2025-06-09", 1.018259, 10182587.71, 0.00361061),
-    ("2025-06-10", 1.019801, 10198009.89, 0.00151456),
-    ("2025-06-11", 1.019524, 10195237.26, -0.00027188),
-    ("2025-06-12", 1.021664, 10216635.48, 0.00209884),
-    ("2025-06-13", 1.022475, 10224754.14, 0.00079465),
-    ("2025-06-16", 1.022856, 10228559.81, 0.0003722),
-    ("2025-06-17", 1.021622, 10216218.39, -0.00120656),
-    ("2025-06-18", 1.020879, 10208787.46, -0.00072737),
-    ("2025-06-20", 1.020735, 10207348.85, -0.00014092),
-    ("2025-06-23", 1.023123, 10231226.94, 0.0023393),
-    ("2025-06-24", 1.022718, 10227183.17, -0.00039524),
-    ("2025-06-25", 1.024262, 10242619.6, 0.00150935),
-    ("2025-06-26", 1.024672, 10246723.2, 0.00040064),
-    ("2025-06-27", 1.023076, 10230756.34, -0.00155824),
-    ("2025-06-30", 1.024606, 10246064.81, 0.00149632),
-    ("2025-07-01", 1.027746, 10277459.49, 0.00306407),
-    ("2025-07-02", 1.026306, 10263063.35, -0.00140075),
-    ("2025-07-03", 1.026213, 10262126.02, -9.133e-05),
-    ("2025-07-04", 1.02719, 10271899.21, 0.00095236),
-    ("2025-07-07", 1.029005, 10290047.46, 0.00176679),
-    ("2025-07-08", 1.025442, 10254421.12, -0.00346221),
-    ("2025-07-09", 1.030179, 10301794.18, 0.00461977),
-    ("2025-07-10", 1.02645, 10264503.4, -0.00361983),
-    ("2025-07-11", 1.029549, 10295486.08, 0.00301843),
-    ("2025-07-14", 1.029924, 10299235.72, 0.0003642),
-    ("2025-07-15", 1.027673, 10276732.8, -0.00218491),
-    ("2025-07-16", 1.027692, 10276920.65, 1.828e-05),
-    ("2025-07-17", 1.026685, 10266854.95, -0.00097945),
-    ("2025-07-18", 1.027665, 10276649.33, 0.00095398),
-    ("2025-07-21", 1.030165, 10301650.97, 0.00243286),
-    ("2025-07-22", 1.031749, 10317485.79, 0.00153711),
-    ("2025-07-23", 1.030554, 10305544.16, -0.00115742),
-    ("2025-07-24", 1.029185, 10291852.13, -0.00132861),
-    ("2025-07-25", 1.030665, 10306646.34, 0.00143747),
-    ("2025-07-28", 1.030041, 10300408.87, -0.00060519),
-    ("2025-07-29", 1.02994, 10299401.92, -9.776e-05),
-    ("2025-07-30", 1.028942, 10289424.76, -0.00096871),
-    ("2025-07-31", 1.031203, 10312034.91, 0.00219742),
-    ("2025-08-01", 1.030206, 10302064.39, -0.00096688),
-    ("2025-08-04", 1.031833, 10318331.73, 0.00157904),
-    ("2025-08-05", 1.032489, 10324891.69, 0.00063576),
-    ("2025-08-06", 1.032626, 10326262.27, 0.00013275),
-    ("2025-08-07", 1.032071, 10320706.78, -0.000538),
-    ("2025-08-08", 1.034915, 10349149.73, 0.00275591),
-    ("2025-08-11", 1.033564, 10335643.44, -0.00130506),
-    ("2025-08-12", 1.034004, 10340042.28, 0.0004256),
-    ("2025-08-13", 1.035323, 10353233.0, 0.00127569),
-    ("2025-08-14", 1.035434, 10354337.56, 0.00010669),
-    ("2025-08-15", 1.034775, 10347745.13, -0.00063668),
-    ("2025-08-18", 1.036558, 10365580.89, 0.00172364),
-    ("2025-08-19", 1.035219, 10352192.59, -0.00129161),
-    ("2025-08-20", 1.033821, 10338207.32, -0.00135095),
-    ("2025-08-21", 1.032799, 10327992.55, -0.00098806),
-    ("2025-08-22", 1.035961, 10359614.77, 0.0030618),
-    ("2025-08-25", 1.036141, 10361412.06, 0.00017349),
-    ("2025-08-26", 1.038266, 10382661.2, 0.0020508),
-    ("2025-08-27", 1.039572, 10395724.91, 0.00125822),
-    ("2025-08-28", 1.04296, 10429595.97, 0.00325817),
-    ("2025-08-29", 1.045882, 10458821.38, 0.00280216),
-    ("2025-09-01", 1.046916, 10469162.2, 0.00098872),
-    ("2025-09-02", 1.048374, 10483739.84, 0.00139244),
-    ("2025-09-03", 1.050449, 10504492.99, 0.00197956),
-    ("2025-09-04", 1.051265, 10512651.52, 0.00077667),
-    ("2025-09-05", 1.050859, 10508593.27, -0.00038603),
-    ("2025-09-08", 1.057106, 10571056.47, 0.00594401),
-    ("2025-09-09", 1.05889, 10588904.24, 0.00168836),
-    ("2025-09-10", 1.056606, 10566056.08, -0.00215775),
-    ("2025-09-11", 1.058578, 10585783.92, 0.0018671),
-    ("2025-09-12", 1.052638, 10526376.03, -0.00561204),
-    ("2025-09-15", 1.058358, 10583577.75, 0.00543413),
-    ("2025-09-16", 1.055397, 10553972.68, -0.00279726),
-    ("2025-09-17", 1.058699, 10586993.56, 0.00312876),
-    ("2025-09-18", 1.062895, 10628947.4, 0.00396277),
-    ("2025-09-19", 1.065266, 10652657.5, 0.00223071),
-    ("2025-09-22", 1.071093, 10710928.08, 0.00547005),
-    ("2025-09-23", 1.063026, 10630263.25, -0.00753108),
-    ("2025-09-24", 1.068268, 10682681.23, 0.00493101),
-    ("2025-09-25", 1.073724, 10737242.99, 0.0051075),
-    ("2025-09-26", 1.072612, 10726115.68, -0.00103633),
-    ("2025-09-29", 1.072068, 10720679.83, -0.00050679),
-    ("2025-09-30", 1.074228, 10742284.16, 0.0020152),
-    ("2025-10-01", 1.076048, 10760480.85, 0.00169393),
-    ("2025-10-02", 1.076392, 10763916.96, 0.00031933),
-    ("2025-10-03", 1.070434, 10704341.79, -0.00553471),
-    ("2025-10-06", 1.070336, 10703358.99, -9.181e-05),
-    ("2025-10-07", 1.069963, 10699628.85, -0.0003485),
-    ("2025-10-08", 1.06816, 10681597.08, -0.00168527),
-    ("2025-10-09", 1.06988, 10698802.46, 0.00161075),
-    ("2025-10-10", 1.081891, 10818913.81, 0.01122662),
-    ("2025-10-13", 1.083904, 10839038.68, 0.00186016),
-    ("2025-10-14", 1.082068, 10820680.95, -0.00169367),
-    ("2025-10-15", 1.087476, 10874763.6, 0.00499808),
-    ("2025-10-16", 1.092407, 10924068.31, 0.00453386),
-    ("2025-10-17", 1.083445, 10834449.46, -0.0082038),
-    ("2025-10-20", 1.087076, 10870764.33, 0.0033518),
-    ("2025-10-21", 1.081816, 10818164.95, -0.00483861),
-    ("2025-10-22", 1.084724, 10847238.99, 0.00268752),
-    ("2025-10-23", 1.085743, 10857431.04, 0.0009396),
-    ("2025-10-24", 1.090422, 10904215.3, 0.00430896),
-    ("2025-10-27", 1.091173, 10911730.28, 0.00068918),
-    ("2025-10-28", 1.089733, 10897326.48, -0.00132003),
-    ("2025-10-29", 1.090588, 10905884.74, 0.00078535),
-    ("2025-10-30", 1.091471, 10914705.07, 0.00080877),
-    ("2025-10-31", 1.092496, 10924957.3, 0.0009393),
-    ("2025-11-03", 1.0867, 10867004.19, -0.00530465),
-    ("2025-11-04", 1.081265, 10812648.98, -0.00500186),
-    ("2025-11-05", 1.082954, 10829541.68, 0.00156231),
-    ("2025-11-06", 1.081421, 10814211.48, -0.00141559),
-    ("2025-11-07", 1.082612, 10826120.44, 0.00110123),
-    ("2025-11-10", 1.088954, 10889537.47, 0.00585778),
-    ("2025-11-11", 1.094076, 10940760.16, 0.00470384),
-    ("2025-11-12", 1.097414, 10974136.21, 0.00305062),
-    ("2025-11-13", 1.095496, 10954963.34, -0.0017471),
-    ("2025-11-14", 1.090032, 10900318.39, -0.00498815),
-    ("2025-11-17", 1.092288, 10922877.55, 0.00206959),
-    ("2025-11-18", 1.089345, 10893447.69, -0.00269433),
-    ("2025-11-19", 1.091566, 10915655.68, 0.00203866),
-    ("2025-11-21", 1.088225, 10882245.42, -0.00306077),
-    ("2025-11-24", 1.094504, 10945041.76, 0.00577053),
-    ("2025-11-25", 1.09967, 10996695.45, 0.00471937),
-    ("2025-11-26", 1.103148, 11031478.13, 0.00316301),
-    ("2025-11-27", 1.107413, 11074128.82, 0.00386627),
-    ("2025-11-28", 1.108941, 11089412.24, 0.0013801),
-    ("2025-12-01", 1.107308, 11073076.01, -0.00147314),
-    ("2025-12-02", 1.110751, 11107505.11, 0.00310926),
-    ("2025-12-03", 1.112903, 11129027.99, 0.00193769),
-    ("2025-12-04", 1.115339, 11153389.86, 0.00218904),
-    ("2025-12-05", 1.121284, 11212840.56, 0.00533028),
-    ("2025-12-08", 1.108862, 11088620.2, -0.0110784),
-    ("2025-12-09", 1.107803, 11078032.34, -0.00095484),
-    ("2025-12-10", 1.114646, 11146455.58, 0.00617648),
-    ("2025-12-11", 1.10885, 11088500.66, -0.0051994),
-    ("2025-12-12", 1.108632, 11086315.07, -0.0001971),
-    ("2025-12-15", 1.111751, 11117510.36, 0.00281386),
-    ("2025-12-16", 1.112311, 11123114.28, 0.00050406),
-    ("2025-12-17", 1.109437, 11094374.59, -0.00258378),
-    ("2025-12-18", 1.11094, 11109395.35, 0.00135391),
-    ("2025-12-19", 1.116328, 11163275.31, 0.00484995),
-    ("2025-12-22", 1.124965, 11249651.78, 0.00773756),
-    ("2025-12-23", 1.121728, 11217279.99, -0.00287758),
-    ("2025-12-26", 1.129142, 11291418.5, 0.00660931),
-    ("2025-12-29", 1.12748, 11274797.26, -0.00147202),
-    ("2025-12-30", 1.122033, 11220325.59, -0.00483128),
-    ("2026-01-02", 1.123466, 11234659.75, 0.00127752),
-    ("2026-01-05", 1.131501, 11315010.8, 0.00715207),
-    ("2026-01-06", 1.132377, 11323766.67, 0.00077383),
-    ("2026-01-07", 1.133027, 11330274.68, 0.00057472),
-    ("2026-01-08", 1.131674, 11316736.6, -0.00119486),
-    ("2026-01-09", 1.134798, 11347984.73, 0.00276123),
-    ("2026-01-12", 1.143098, 11430982.32, 0.00731386),
-    ("2026-01-13", 1.144603, 11446032.68, 0.00131663),
-    ("2026-01-14", 1.154485, 11544846.55, 0.00863302),
-    ("2026-01-15", 1.15111, 11511097.71, -0.00292328),
-    ("2026-01-16", 1.147132, 11471320.93, -0.00345552),
-    ("2026-01-19", 1.142509, 11425094.84, -0.00402971),
-    ("2026-01-20", 1.144941, 11449408.9, 0.00212813),
-    ("2026-01-21", 1.151657, 11516570.28, 0.00586593),
-    ("2026-01-22", 1.161575, 11615751.03, 0.008612),
-    ("2026-01-23", 1.169618, 11696178.27, 0.00692398),
-    ("2026-01-26", 1.169045, 11690452.68, -0.00048953),
-    ("2026-01-27", 1.169874, 11698737.96, 0.00070872),
-    ("2026-01-28", 1.186161, 11861607.95, 0.01392201),
-    ("2026-01-29", 1.183201, 11832009.0, -0.00249536),
-    ("2026-01-30", 1.164167, 11641670.32, -0.01608676),
-    ("2026-02-02", 1.156128, 11561281.45, -0.00690527),
-    ("2026-02-03", 1.169127, 11691273.71, 0.01124376),
-    ("2026-02-04", 1.152724, 11527238.34, -0.01403058),
-    ("2026-02-05", 1.140582, 11405824.04, -0.01053282),
-    ("2026-02-06", 1.149582, 11495816.86, 0.00789008),
-    ("2026-02-09", 1.157987, 11579873.5, 0.00731193),
-    ("2026-02-10", 1.157084, 11570841.91, -0.00077994),
-    ("2026-02-11", 1.162829, 11628290.56, 0.00496495),
-    ("2026-02-12", 1.152813, 11528133.68, -0.00861321),
-    ("2026-02-13", 1.15792, 11579204.24, 0.00443008),
-    ("2026-02-18", 1.164115, 11641148.37, 0.0053496),
-    ("2026-02-19", 1.162003, 11620025.21, -0.00181453),
-    ("2026-02-20", 1.163878, 11638777.52, 0.00161379),
-    ("2026-02-23", 1.163467, 11634667.68, -0.00035312),
-    ("2026-02-24", 1.168462, 11684623.76, 0.00429373),
-    ("2026-02-25", 1.173622, 11736223.49, 0.00441604),
-    ("2026-02-26", 1.172431, 11724310.68, -0.00101505),
-    ("2026-02-27", 1.170722, 11707218.55, -0.00145784),
-    ("2026-03-02", 1.17817, 11781702.93, 0.00636226),
-    ("2026-03-03", 1.16127, 11612701.92, -0.01434436),
-    ("2026-03-04", 1.166573, 11665729.56, 0.00456635),
-    ("2026-03-05", 1.155323, 11553229.13, -0.00964367),
-    ("2026-03-06", 1.139146, 11391457.16, -0.01400232),
-    ("2026-03-09", 1.13296, 11329603.85, -0.0054298),
-    ("2026-03-10", 1.151118, 11511179.76, 0.01602668),
-    ("2026-03-11", 1.147885, 11478848.67, -0.00280867),
-    ("2026-03-12", 1.144824, 11448242.71, -0.00266629),
-    ("2026-03-13", 1.135995, 11359948.64, -0.00771246),
-    ("2026-03-16", 1.132691, 11326912.94, -0.00290809),
-    ("2026-03-17", 1.137547, 11375465.62, 0.00428649),
-    ("2026-03-18", 1.131405, 11314045.83, -0.00539932),
-    ("2026-03-19", 1.110721, 11107210.53, -0.01828129),
-    ("2026-03-20", 1.109164, 11091639.02, -0.00140193),
-    ("2026-03-23", 1.111439, 11114392.21, 0.00205138),
-    ("2026-03-24", 1.113362, 11133621.61, 0.00173014),
-    ("2026-03-25", 1.125862, 11258622.74, 0.01122736),
-    ("2026-03-26", 1.104756, 11047564.7, -0.01874635),
-    ("2026-03-27", 1.104742, 11047422.31, -1.289e-05),
-    ("2026-03-30", 1.109704, 11097042.48, 0.00449156),
-    ("2026-03-31", 1.122149, 11221492.9, 0.01121474),
-    ("2026-04-01", 1.126816, 11268157.29, 0.00415848),
-    ("2026-04-02", 1.120887, 11208866.48, -0.0052618),
-    ("2026-04-06", 1.124008, 11240080.42, 0.00278475),
-    ("2026-04-07", 1.124017, 11240172.86, 8.22e-06),
-    ("2026-04-08", 1.140182, 11401823.34, 0.01438149),
-    ("2026-04-09", 1.136581, 11365812.93, -0.0031583),
-    ("2026-04-10", 1.137201, 11372008.82, 0.00054513),
-    ("2026-04-13", 1.144272, 11442717.3, 0.00621777),
-    ("2026-04-14", 1.153021, 11530211.53, 0.00764628),
-    ("2026-04-15", 1.152785, 11527846.99, -0.00020507),
-    ("2026-04-16", 1.156629, 11566285.6, 0.00333441),
-    ("2026-04-17", 1.158007, 11580073.95, 0.00119212),
-    ("2026-04-20", 1.158494, 11584939.97, 0.00042021),
-    ("2026-04-22", 1.158748, 11587484.82, 0.00021967),
-    ("2026-04-23", 1.153724, 11537242.34, -0.00433593),
-    ("2026-04-24", 1.146121, 11461208.18, -0.00659032),
-    ("2026-04-27", 1.148526, 11485259.06, 0.00209846),
-    ("2026-04-28", 1.139241, 11392413.81, -0.00808386),
-    ("2026-04-29", 1.139501, 11395008.04, 0.00022772),
-    ("2026-04-30", 1.143016, 11430161.06, 0.00308495),
-    ("2026-05-04", 1.13885, 11388501.87, -0.00364467),
-    ("2026-05-05", 1.137116, 11371158.76, -0.00152286),
-    ("2026-05-06", 1.150552, 11505524.05, 0.01181632),
-    ("2026-05-07", 1.144075, 11440746.23, -0.00563015),
-    ("2026-05-08", 1.141763, 11417629.14, -0.00202059),
-    ("2026-05-11", 1.145808, 11458075.24, 0.00354243),
-    ("2026-05-12", 1.140333, 11403326.92, -0.00477814),
-    ("2026-05-13", 1.148801, 11488013.67, 0.00742649),
-    ("2026-05-14", 1.140751, 11407511.46, -0.0070075),
-    ("2026-05-15", 1.134496, 11344955.51, -0.00548375),
-    ("2026-05-18", 1.12661, 11266100.49, -0.00695067),
-    ("2026-05-19", 1.12501, 11250102.78, -0.00141999),
-    ("2026-05-20", 1.12681, 11268102.1, 0.00159992),
-    ("2026-05-21", 1.126737, 11267367.93, -6.515e-05),
-    ("2026-05-22", 1.131375, 11313751.96, 0.00411667),
-    ("2026-05-25", 1.134344, 11343442.29, 0.00262427),
-    ("2026-05-26", 1.135204, 11352041.35, 0.00075806),
-    ("2026-05-27", 1.13683, 11368303.34, 0.00143252),
-    ("2026-05-28", 1.136756, 11367559.3, -6.545e-05),
-    ("2026-05-29", 1.135355, 11353554.46, -0.001232),
+# ─────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+PL_INICIAL   = 10_000_000.0
+DATA_T0      = date(2025, 4, 30)
+COTA_T0      = 1.0
+
+# Tickers Yahoo Finance → nome interno
+YAHOO_TICKERS = {
+    "IVV":    "IVV",
+    "IAU":    "IAU",
+    "STIP":   "STIP",
+    "URNM":   "URNM",
+    "REMX":   "REMX",
+    "CPER":   "CPER",
+    "CORN":   "CORN",
+    "CANE":   "CANE",
+    "BTC-USD":"Bitcoin",
+    "BRL=X":  "USDBRL",
+    "EURUSD=X":"EURUSD",
+    "BOVA11.SA":"BOVA11",
+    "UTLL11.SA":"UTLL11",
+    "RAIL3.SA": "RAIL3",
+    "SMAL11.SA":"SMAL11",
+}
+
+# Carteiras históricas: (data, {ativo: peso})
+CARTEIRAS = [
+    (date(2025, 4, 30), {
+        "LFT 2031":0.14,"NTN-B 2029":0.27,"IAU":0.12,"IVV":0.08
+    }),
+    (date(2025, 8, 29), {
+        "LTN 2032":0.46,"IVV":0.304,"IAU":0.109
+    }),
+    (date(2025, 9, 30), {
+        "LTN 2032":0.45,"BOVA11":0.135,"IAU":0.103,"IVV":0.06
+    }),
+    (date(2025, 10, 31), {
+        "LTN 2032":0.47,"BOVA11":0.115,"IAU":0.075,"IVV":0.06,
+        "URNM":0.06,"REMX":0.05,"Bitcoin":0.03,"CPER":0.02
+    }),
+    (date(2026, 1, 30), {
+        "LTN 2032":0.50,"BOVA11":0.115,"IAU":0.075,"IVV":0.06,
+        "URNM":0.06,"REMX":0.05,"Bitcoin":0.03,"CPER":0.02
+    }),
+    (date(2026, 3, 20), {
+        "LTN 2032":0.25,"NTN-B 2040":0.13,"LFT 2031":0.15,
+        "BOVA11":0.08,"IAU":0.08,"URNM":0.07,"IVV":0.06,
+        "REMX":0.05,"STIP":0.03,"Bitcoin":0.03,"RAIL3":0.02,"CPER":0.02
+    }),
+    (date(2026, 4, 24), {
+        "NTN-B 2040":0.185,"LFT 2031":0.15,"LTN 2032":0.13,
+        "IVV":0.10,"STIP":0.07,"Swedish Gov Bond":0.05,"IAU":0.05,
+        "Siemens Bond":0.04,"BOVA11":0.03,"UTLL11":0.03,
+        "CPER":0.025,"URNM":0.02,"REMX":0.02,"RAIL3":0.02,
+        "CORN":0.015,"CANE":0.01,"Bitcoin":0.01,
+    }),
+    (date(2026, 5, 29), {
+        "LFT 2031":0.24,"NTN-B 2029":0.195,"NTN-B 2035":0.145,
+        "STIP":0.07,"IAU":0.05,"Swedish Gov Bond":0.05,
+        "Siemens Bond":0.04,"IVV":0.03,"BOVA11":0.03,"UTLL11":0.03,
+        "CPER":0.025,"URNM":0.02,"REMX":0.02,"RAIL3":0.02,
+        "CORN":0.015,"CANE":0.01,"Bitcoin":0.01,
+    }),
 ]
 
-print(f"Carregando {len(COTAS)} dias de cotas...")
-ok = 0
-for i, (data, cota, pl, retorno) in enumerate(COTAS):
-    try:
-        r = requests.post(
-            f"{BASE_URL}/api/carga-historica",
-            json={"data": data, "cota": cota, "pl": pl, "retorno": retorno},
-            timeout=30
-        )
-        if r.status_code == 200:
-            ok += 1
-        else:
-            print(f"  Erro em {data}: {r.text[:100]}")
-    except Exception as e:
-        print(f"  Excecao em {data}: {e}")
-    if (i+1) % 50 == 0:
-        print(f"  {i+1}/{len(COTAS)} processados...")
+# Futuros/derivativos
+FUTUROS = {
+    "EUR/BRL":  {"entrada": date(2026, 4, 24), "long": False, "notional": 0.08,  "preco_ref": "EURUSD"},
+    "MXN/CAD":  {"entrada": date(2026, 4, 27), "long": True,  "notional": 0.03,  "preco_ref": "MXNCAD"},
+    "SMAL11":   {"entrada": date(2026, 5, 29), "long": False, "notional": 0.025, "preco_ref": "SMAL11"},
+}
 
-print(f"\nCarga concluida: {ok}/{len(COTAS)} dias carregados.")
+# ─────────────────────────────────────────────
+# DATABASE
+# ─────────────────────────────────────────────
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
+def init_db():
+    """Cria as tabelas se não existirem."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cotas_diarias (
+            id          SERIAL PRIMARY KEY,
+            data        DATE UNIQUE NOT NULL,
+            cota        NUMERIC(12,6) NOT NULL,
+            pl          NUMERIC(18,2),
+            retorno_dia NUMERIC(12,8),
+            created_at  TIMESTAMP DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS precos_ativos (
+            id         SERIAL PRIMARY KEY,
+            data       DATE NOT NULL,
+            ativo      VARCHAR(64) NOT NULL,
+            preco      NUMERIC(18,6) NOT NULL,
+            fonte      VARCHAR(32),
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(data, ativo)
+        );
+
+        CREATE TABLE IF NOT EXISTS cdi_mensal (
+            mes        VARCHAR(7) PRIMARY KEY,  -- formato YYYY-MM
+            taxa       NUMERIC(8,6) NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS precos_manuais (
+            ativo      VARCHAR(64) PRIMARY KEY,
+            preco      NUMERIC(18,6) NOT NULL,
+            data_ref   DATE NOT NULL,
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("Database initialized")
+
+    # Inserir CDI histórico se tabela estiver vazia
+    _seed_cdi()
+
+def _seed_cdi():
+    """Insere o CDI histórico conhecido."""
+    cdi_historico = {
+        "2025-05": 0.01140, "2025-06": 0.01100, "2025-07": 0.01280,
+        "2025-08": 0.01160, "2025-09": 0.01220, "2025-10": 0.01280,
+        "2025-11": 0.01050, "2025-12": 0.01220, "2026-01": 0.01160,
+        "2026-02": 0.01000, "2026-03": 0.01210, "2026-04": 0.01090,
+        "2026-05": 0.01070,
+    }
+    conn = get_conn()
+    cur = conn.cursor()
+    for mes, taxa in cdi_historico.items():
+        cur.execute("""
+            INSERT INTO cdi_mensal (mes, taxa)
+            VALUES (%s, %s)
+            ON CONFLICT (mes) DO NOTHING
+        """, (mes, taxa))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+# ─────────────────────────────────────────────
+# BUSCA DE PREÇOS
+# ─────────────────────────────────────────────
+def fetch_yahoo(tickers: list, data: date) -> dict:
+    """Busca preços de fechamento do Yahoo Finance."""
+    precos = {}
+    try:
+        start = data - timedelta(days=5)
+        end   = data + timedelta(days=1)
+        raw = yf.download(
+            tickers, start=start.isoformat(), end=end.isoformat(),
+            auto_adjust=True, progress=False, threads=True
+        )
+        if raw.empty:
+            return precos
+
+        close = raw["Close"] if len(tickers) > 1 else raw[["Close"]]
+        close.columns = tickers if len(tickers) > 1 else tickers
+
+        for t in tickers:
+            if t in close.columns:
+                series = close[t].dropna()
+                if not series.empty:
+                    precos[t] = float(series.iloc[-1])
+    except Exception as e:
+        logger.error(f"Yahoo error: {e}")
+    return precos
+
+def fetch_tesouro(data: date) -> dict:
+    """Busca PU dos títulos do Tesouro Direto via API pública."""
+    precos = {}
+    try:
+        url = "https://www.tesourodireto.com.br/json/br/com/b3/tesourodireto/model/dto/TesouroDiretoDto.json"
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return precos
+        dados = r.json()
+        titulos = dados.get("response", {}).get("TrsrBdTradgList", [])
+        mapa = {
+            "Tesouro Selic 2031":   "LFT 2031",
+            "Tesouro IPCA+ 2029":   "NTN-B 2029",
+            "Tesouro IPCA+ 2035":   "NTN-B 2035",
+            "Tesouro IPCA+ 2040":   "NTN-B 2040",
+            "Tesouro Prefixado 2032":"LTN 2032",
+        }
+        for t in titulos:
+            nome = t.get("TrsrBd", {}).get("nm", "")
+            pu   = t.get("TrsrBd", {}).get("untrRedVal", None)
+            for nome_td, nome_interno in mapa.items():
+                if nome_td in nome and pu:
+                    precos[nome_interno] = float(pu)
+    except Exception as e:
+        logger.error(f"Tesouro error: {e}")
+    return precos
+
+def fetch_bcb_cdi(mes: str) -> Optional[float]:
+    """Busca CDI mensal do Banco Central. mes = 'YYYY-MM'"""
+    try:
+        ano, m = mes.split("-")
+        url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.4391/dados?formato=json&dataInicial=01/{m}/{ano}&dataFinal=31/{m}/{ano}"
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        dados = r.json()
+        if not dados:
+            return None
+        # CDI diário acumulado no mês
+        taxa_acum = 1.0
+        for d in dados:
+            taxa_acum *= (1 + float(d["valor"]) / 100)
+        return round(taxa_acum - 1, 8)
+    except Exception as e:
+        logger.error(f"BCB error: {e}")
+        return None
+
+def get_precos_manuais() -> dict:
+    """Retorna últimos preços inseridos manualmente (Swedish Bond, Siemens Bond)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT ativo, preco FROM precos_manuais")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return {r["ativo"]: float(r["preco"]) for r in rows}
+
+def get_ultimo_preco(ativo: str, antes_de: date) -> Optional[float]:
+    """Busca o último preço registrado de um ativo antes de uma data."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT preco FROM precos_ativos
+        WHERE ativo = %s AND data < %s
+        ORDER BY data DESC LIMIT 1
+    """, (ativo, antes_de))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return float(row["preco"]) if row else None
+
+# ─────────────────────────────────────────────
+# CARTEIRA
+# ─────────────────────────────────────────────
+def get_carteira_vigente(data: date) -> dict:
+    carteira = {}
+    for rebalance_date, pesos in CARTEIRAS:
+        if rebalance_date <= data:
+            carteira = pesos
+    return carteira
+
+def get_cota_anterior(data: date) -> tuple:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT data, cota, pl FROM cotas_diarias
+        WHERE data < %s ORDER BY data DESC LIMIT 1
+    """, (data,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row:
+        return row["data"], float(row["cota"]), float(row["pl"] or PL_INICIAL)
+    return DATA_T0, COTA_T0, PL_INICIAL
+
+# ─────────────────────────────────────────────
+# BATIMENTO PRINCIPAL
+# ─────────────────────────────────────────────
+def run_batimento(data: date = None):
+    """
+    Executa o batimento de cotas para uma data.
+    Busca preços, calcula retorno ponderado, salva nova cota.
+    """
+    if data is None:
+        data = date.today()
+
+    logger.info(f"=== Batimento: {data} ===")
+
+    # 1. Buscar preços automáticos
+    yahoo_precos_raw = fetch_yahoo(list(YAHOO_TICKERS.keys()), data)
+    yahoo_precos = {YAHOO_TICKERS[k]: v for k, v in yahoo_precos_raw.items() if k in YAHOO_TICKERS}
+
+    tesouro_precos = fetch_tesouro(data)
+    manuais = get_precos_manuais()
+
+    precos_hoje = {**yahoo_precos, **tesouro_precos, **manuais}
+
+    # 2. Salvar preços no banco
+    conn = get_conn()
+    cur = conn.cursor()
+    for ativo, preco in precos_hoje.items():
+        fonte = "yahoo" if ativo in yahoo_precos else ("tesouro" if ativo in tesouro_precos else "manual")
+        cur.execute("""
+            INSERT INTO precos_ativos (data, ativo, preco, fonte)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (data, ativo) DO UPDATE SET preco = EXCLUDED.preco
+        """, (data, ativo, preco, fonte))
+    conn.commit()
+
+    # 3. Calcular retorno do dia
+    carteira = get_carteira_vigente(data)
+    data_ant, cota_ant, pl_ant = get_cota_anterior(data)
+
+    # USD/BRL hoje e anterior (para converter ativos em USD)
+    usdbrl_hoje = precos_hoje.get("USDBRL", 1.0)
+    usdbrl_ant  = get_ultimo_preco("USDBRL", data) or usdbrl_hoje
+
+    ativos_usd = {
+        "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
+        "Bitcoin","Swedish Gov Bond","Siemens Bond"
+    }
+
+    retorno_dia = 0.0
+    detalhes = []
+
+    for ativo, peso in carteira.items():
+        preco_hoje_a = precos_hoje.get(ativo)
+        preco_ant_a  = get_ultimo_preco(ativo, data)
+
+        if preco_hoje_a is None or preco_ant_a is None:
+            logger.warning(f"  Sem preço para {ativo} — ignorado")
+            continue
+
+        if ativo in ativos_usd:
+            # Converte variação para BRL
+            val_hoje = preco_hoje_a * usdbrl_hoje
+            val_ant  = preco_ant_a  * usdbrl_ant
+            var = val_hoje / val_ant - 1 if val_ant > 0 else 0
+        else:
+            var = preco_hoje_a / preco_ant_a - 1 if preco_ant_a > 0 else 0
+
+        contrib = peso * var
+        retorno_dia += contrib
+        detalhes.append({"ativo": ativo, "peso": peso, "var": var, "contrib": contrib})
+        logger.info(f"  {ativo}: {var:.4%} × {peso:.1%} = {contrib:.4%}")
+
+    # Derivativos
+    for nome, cfg in FUTUROS.items():
+        if cfg["entrada"] > data:
+            continue
+        ref = cfg["preco_ref"]
+        ph = precos_hoje.get(ref)
+        pa = get_ultimo_preco(ref, data)
+        if ph and pa:
+            var_fut = ph / pa - 1 if pa > 0 else 0
+            if not cfg["long"]:
+                var_fut = -var_fut
+            contrib = cfg["notional"] * var_fut
+            retorno_dia += contrib
+            logger.info(f"  {nome}: {var_fut:.4%} × {cfg['notional']:.1%} = {contrib:.4%}")
+
+    # 4. Nova cota e PL
+    nova_cota = cota_ant * (1 + retorno_dia)
+    novo_pl   = pl_ant   * (1 + retorno_dia)
+
+    # 5. Salvar cota
+    cur.execute("""
+        INSERT INTO cotas_diarias (data, cota, pl, retorno_dia)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (data) DO UPDATE
+        SET cota = EXCLUDED.cota, pl = EXCLUDED.pl, retorno_dia = EXCLUDED.retorno_dia
+    """, (data, round(nova_cota, 6), round(novo_pl, 2), round(retorno_dia, 8)))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    logger.info(f"  Retorno: {retorno_dia:.4%} | Cota: {nova_cota:.6f} | PL: R$ {novo_pl:,.2f}")
+    return {"data": str(data), "cota": nova_cota, "retorno": retorno_dia, "pl": novo_pl}
+
+# ─────────────────────────────────────────────
+# MÉTRICAS
+# ─────────────────────────────────────────────
+def calcular_metricas() -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT data, cota, retorno_dia, pl FROM cotas_diarias ORDER BY data")
+    rows = cur.fetchall()
+
+    cur.execute("SELECT mes, taxa FROM cdi_mensal ORDER BY mes")
+    cdi_rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return {}
+
+    cotas   = [float(r["cota"]) for r in rows]
+    rets    = [float(r["retorno_dia"]) for r in rows if r["retorno_dia"] is not None]
+    datas   = [r["data"] for r in rows]
+    pl_atual = float(rows[-1]["pl"] or PL_INICIAL)
+
+    # CDI acumulado
+    cdi_acum = 1.0
+    for r in cdi_rows:
+        cdi_acum *= (1 + float(r["taxa"]))
+    cdi_acum -= 1
+
+    ret_total = cotas[-1] / cotas[0] - 1
+    n_anos    = len(cotas) / 252
+    ret_anual = (1 + ret_total) ** (1 / max(n_anos, 0.01)) - 1
+    cdi_anual = (1 + cdi_acum) ** (1 / max(n_anos, 0.01)) - 1
+    vol_d     = float(np.std(rets)) if rets else 0
+    vol_a     = vol_d * (252 ** 0.5)
+    sharpe    = (ret_anual - cdi_anual) / vol_a if vol_a > 0 else 0
+
+    downside  = float(np.std([r for r in rets if r < 0])) * (252 ** 0.5) if rets else 0
+    sortino   = (ret_anual - cdi_anual) / downside if downside > 0 else 0
+
+    # Drawdown
+    running_max = cotas[0]
+    max_dd = 0.0
+    peak_date = datas[0]
+    valley_date = datas[0]
+    for i, c in enumerate(cotas):
+        if c > running_max:
+            running_max = c
+            peak_date = datas[i]
+        dd = (c - running_max) / running_max
+        if dd < max_dd:
+            max_dd = dd
+            valley_date = datas[i]
+
+    # VaR
+    var95 = float(np.percentile(rets, 5)) if rets else 0
+    var99 = float(np.percentile(rets, 1)) if rets else 0
+
+    # Retornos mensais
+    df = pd.DataFrame({"data": datas, "cota": cotas})
+    df["data"] = pd.to_datetime(df["data"])
+    df["mes"]  = df["data"].dt.to_period("M").astype(str)
+    monthly = {}
+    prev = df["cota"].iloc[0]
+    for mes, g in df.groupby("mes"):
+        g = g.sort_values("data")
+        r = g["cota"].iloc[-1] / prev - 1
+        monthly[mes] = round(r, 6)
+        prev = g["cota"].iloc[-1]
+
+    meses_pos = sum(1 for v in monthly.values() if v > 0)
+    meses_neg = sum(1 for v in monthly.values() if v < 0)
+    cdi_dict  = {r["mes"]: float(r["taxa"]) for r in cdi_rows}
+    meses_acima_cdi = sum(
+        1 for mes, v in monthly.items()
+        if v > cdi_dict.get(mes, 0)
+    )
+
+    return {
+        "ret_total":      round(ret_total, 6),
+        "ret_anual":      round(ret_anual, 6),
+        "cdi_acum":       round(cdi_acum, 6),
+        "cdi_anual":      round(cdi_anual, 6),
+        "alpha_total":    round(ret_total - cdi_acum, 6),
+        "alpha_anual":    round(ret_anual - cdi_anual, 6),
+        "vol_anual":      round(vol_a, 6),
+        "sharpe":         round(sharpe, 4),
+        "sortino":        round(sortino, 4),
+        "max_dd":         round(max_dd, 6),
+        "peak_date":      str(peak_date),
+        "valley_date":    str(valley_date),
+        "var95_d":        round(var95, 6),
+        "var99_d":        round(var99, 6),
+        "pl_atual":       round(pl_atual, 2),
+        "cota_atual":     round(cotas[-1], 6),
+        "cota_inicial":   round(cotas[0], 6),
+        "data_inicio":    str(datas[0]),
+        "data_atual":     str(datas[-1]),
+        "meses_pos":      meses_pos,
+        "meses_neg":      meses_neg,
+        "meses_acima_cdi":meses_acima_cdi,
+        "monthly":        monthly,
+        "cdi_monthly":    cdi_dict,
+    }
+
+# ─────────────────────────────────────────────
+# FASTAPI APP
+# ─────────────────────────────────────────────
+app = FastAPI(title="Prospecta FIM API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "PUT"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+def startup():
+    if DATABASE_URL:
+        init_db()
+        # Scheduler: roda batimento todo dia às 18h Brasília (UTC-3 = 21h UTC)
+        scheduler = BackgroundScheduler(timezone="America/Sao_Paulo")
+        scheduler.add_job(run_batimento, "cron", hour=18, minute=0)
+        scheduler.start()
+        logger.info("Scheduler started — batimento às 18h todo dia útil")
+    else:
+        logger.warning("DATABASE_URL não definida — rodando sem banco")
+
+@app.get("/")
+def root():
+    return {"status": "ok", "fundo": "Prospecta FIM", "version": "1.0.0"}
+
+@app.get("/api/metricas")
+def get_metricas():
+    """Retorna todas as métricas calculadas do fundo."""
+    try:
+        return calcular_metricas()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/api/cotas")
+def get_cotas(limit: int = 500):
+    """Retorna a série histórica de cotas."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT data, cota, pl, retorno_dia
+        FROM cotas_diarias
+        ORDER BY data DESC LIMIT %s
+    """, (limit,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.get("/api/cota/hoje")
+def get_cota_hoje():
+    """Retorna a cota mais recente."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT data, cota, pl, retorno_dia
+        FROM cotas_diarias ORDER BY data DESC LIMIT 1
+    """)
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Nenhuma cota encontrada")
+    return dict(row)
+
+@app.get("/api/precos/{ativo}")
+def get_precos_ativo(ativo: str, limit: int = 252):
+    """Retorna histórico de preços de um ativo."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT data, preco, fonte FROM precos_ativos
+        WHERE ativo = %s ORDER BY data DESC LIMIT %s
+    """, (ativo, limit))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/batimento")
+def trigger_batimento(data_str: Optional[str] = None):
+    """Dispara o batimento manualmente. Opcional: data no formato YYYY-MM-DD."""
+    try:
+        data = date.fromisoformat(data_str) if data_str else date.today()
+        resultado = run_batimento(data)
+        return resultado
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.put("/api/preco-manual")
+def upsert_preco_manual(ativo: str, preco: float, data_ref: str):
+    """
+    Atualiza preço manual de um ativo (Swedish Bond, Siemens Bond, etc).
+    Chamado pelo Hub quando você insere um preço manualmente.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO precos_manuais (ativo, preco, data_ref)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (ativo) DO UPDATE
+        SET preco = EXCLUDED.preco, data_ref = EXCLUDED.data_ref, updated_at = NOW()
+    """, (ativo, preco, date.fromisoformat(data_ref)))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"ok": True, "ativo": ativo, "preco": preco}
+
+@app.put("/api/cdi")
+def upsert_cdi(mes: str, taxa: float):
+    """
+    Atualiza o CDI de um mês. mes = 'YYYY-MM', taxa = decimal (ex: 0.0107)
+    Chamado automaticamente pelo scheduler ou manualmente pelo Hub.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO cdi_mensal (mes, taxa)
+        VALUES (%s, %s)
+        ON CONFLICT (mes) DO UPDATE SET taxa = EXCLUDED.taxa
+    """, (mes, taxa))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    # Tenta buscar do BCB automaticamente
+    taxa_bcb = fetch_bcb_cdi(mes)
+    if taxa_bcb:
+        cur2 = conn.cursor() if not conn.closed else get_conn().cursor()
+        conn2 = get_conn()
+        cur2 = conn2.cursor()
+        cur2.execute("""
+            INSERT INTO cdi_mensal (mes, taxa)
+            VALUES (%s, %s)
+            ON CONFLICT (mes) DO UPDATE SET taxa = EXCLUDED.taxa
+        """, (mes, taxa_bcb))
+        conn2.commit()
+        cur2.close()
+        conn2.close()
+        return {"ok": True, "mes": mes, "taxa": taxa_bcb, "fonte": "BCB"}
+
+    return {"ok": True, "mes": mes, "taxa": taxa, "fonte": "manual"}
+
+@app.get("/api/cdi")
+def get_cdi():
+    """Retorna todos os CDIs registrados."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT mes, taxa FROM cdi_mensal ORDER BY mes")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.get("/api/carteira")
+def get_carteira_atual():
+    """Retorna a carteira vigente com pesos."""
+    hoje = date.today()
+    carteira = get_carteira_vigente(hoje)
+    return {
+        "data": str(hoje),
+        "posicoes": [{"ativo": k, "peso": v} for k, v in carteira.items()],
+        "derivativos": [
+            {
+                "nome": k,
+                "long": v["long"],
+                "notional": v["notional"],
+                "entrada": str(v["entrada"])
+            }
+            for k, v in FUTUROS.items()
+            if v["entrada"] <= hoje
+        ]
+    }
+
+
+@app.post("/api/carga-historica")
+def carga_historica(payload: dict):
+    """
+    Endpoint de carga histórica — usado uma única vez para popular o banco
+    com o histórico de cotas desde o início do fundo.
+    Payload: {data, cota, pl, retorno}
+    """
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO cotas_diarias (data, cota, pl, retorno_dia)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (data) DO UPDATE
+            SET cota = EXCLUDED.cota,
+                pl = EXCLUDED.pl,
+                retorno_dia = EXCLUDED.retorno_dia
+        """, (
+            payload["data"],
+            payload["cota"],
+            payload.get("pl"),
+            payload.get("retorno")
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"ok": True, "data": payload["data"]}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/api/status")
+def get_status():
+    """Retorna status do sistema e última atualização."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT data, cota FROM cotas_diarias ORDER BY data DESC LIMIT 1")
+    ultima = cur.fetchone()
+    cur.execute("SELECT COUNT(*) as total FROM cotas_diarias")
+    total = cur.fetchone()
+    cur.close()
+    conn.close()
+    return {
+        "status": "ok",
+        "ultima_cota": dict(ultima) if ultima else None,
+        "total_dias": int(total["total"]) if total else 0,
+        "timestamp": datetime.now().isoformat(),
+    }
