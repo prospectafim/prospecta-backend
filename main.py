@@ -680,6 +680,37 @@ def get_carteira_atual():
         ]
     }
 
+
+@app.post("/api/carga-historica")
+def carga_historica(payload: dict):
+    """
+    Endpoint de carga histórica — usado uma única vez para popular o banco
+    com o histórico de cotas desde o início do fundo.
+    Payload: {data, cota, pl, retorno}
+    """
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO cotas_diarias (data, cota, pl, retorno_dia)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (data) DO UPDATE
+            SET cota = EXCLUDED.cota,
+                pl = EXCLUDED.pl,
+                retorno_dia = EXCLUDED.retorno_dia
+        """, (
+            payload["data"],
+            payload["cota"],
+            payload.get("pl"),
+            payload.get("retorno")
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"ok": True, "data": payload["data"]}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 @app.get("/api/status")
 def get_status():
     """Retorna status do sistema e última atualização."""
