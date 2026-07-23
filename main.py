@@ -711,6 +711,22 @@ def carga_historica(payload: dict):
     except Exception as e:
         raise HTTPException(500, str(e))
 
+
+@app.delete("/api/cota/{data_str}")
+def delete_cota(data_str: str):
+    """Remove uma cota específica do banco (usado para limpar dias zerados)."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM cotas_diarias WHERE data = %s", (data_str,))
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"ok": True, "data": data_str, "deleted": deleted}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 @app.get("/api/status")
 def get_status():
     """Retorna status do sistema e última atualização."""
