@@ -756,6 +756,25 @@ def carga_precos(payload: dict):
     except Exception as e:
         raise HTTPException(500, str(e))
 
+
+@app.delete("/api/preco/{ativo}/{data_str}")
+def delete_preco(ativo: str, data_str: str):
+    """Remove um preço específico de um ativo em uma data."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM precos_ativos WHERE ativo = %s AND data = %s",
+            (ativo, data_str)
+        )
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"ok": True, "ativo": ativo, "data": data_str, "deleted": deleted}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 @app.get("/api/status")
 def get_status():
     """Retorna status do sistema e última atualização."""
