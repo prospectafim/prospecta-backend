@@ -727,6 +727,35 @@ def delete_cota(data_str: str):
     except Exception as e:
         raise HTTPException(500, str(e))
 
+
+@app.post("/api/carga-precos")
+def carga_precos(payload: dict):
+    """
+    Carrega preços históricos diretamente na tabela precos_ativos.
+    Usado para popular dados históricos de Tesouros e outros ativos.
+    Payload: {data, ativo, preco, fonte}
+    """
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO precos_ativos (data, ativo, preco, fonte)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (data, ativo) DO UPDATE
+            SET preco = EXCLUDED.preco, fonte = EXCLUDED.fonte
+        """, (
+            payload["data"],
+            payload["ativo"],
+            payload["preco"],
+            payload.get("fonte", "manual")
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"ok": True, "data": payload["data"], "ativo": payload["ativo"]}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 @app.get("/api/status")
 def get_status():
     """Retorna status do sistema e última atualização."""
