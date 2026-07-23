@@ -309,26 +309,41 @@ def run_batimento(data: date = None):
 
     logger.info(f"=== Batimento: {data} ===")
 
-    # 1. Buscar preços automáticos
-    yahoo_precos_raw = fetch_yahoo(list(YAHOO_TICKERS.keys()), data)
-    yahoo_precos = {YAHOO_TICKERS[k]: v for k, v in yahoo_precos_raw.items() if k in YAHOO_TICKERS}
+    today = date.today()
+    is_historical = data < today
 
-    tesouro_precos = fetch_tesouro(data)
-    manuais = get_precos_manuais()
-
-    precos_hoje = {**yahoo_precos, **tesouro_precos, **manuais}
-
-    # 2. Salvar preços no banco
-    conn = get_conn()
-    cur = conn.cursor()
-    for ativo, preco in precos_hoje.items():
-        fonte = "yahoo" if ativo in yahoo_precos else ("tesouro" if ativo in tesouro_precos else "manual")
+    if is_historical:
+        # ── Modo histórico: usa preços já no banco ──
+        conn = get_conn()
+        cur = conn.cursor()
         cur.execute("""
-            INSERT INTO precos_ativos (data, ativo, preco, fonte)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (data, ativo) DO UPDATE SET preco = EXCLUDED.preco
-        """, (data, ativo, preco, fonte))
-    conn.commit()
+            SELECT ativo, preco FROM precos_ativos
+            WHERE data = %s
+        """, (data,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        precos_hoje = {r["ativo"]: float(r["preco"]) for r in rows}
+        logger.info(f"  Modo histórico: {len(precos_hoje)} preços no banco para {data}")
+        conn = get_conn()
+        cur = conn.cursor()
+    else:
+        # ── Modo ao vivo: busca preços das APIs ──
+        yahoo_precos_raw = fetch_yahoo(list(YAHOO_TICKERS.keys()), data)
+        yahoo_precos = {YAHOO_TICKERS[k]: v for k, v in yahoo_precos_raw.items() if k in YAHOO_TICKERS}
+        tesouro_precos = fetch_tesouro(data)
+        manuais = get_precos_manuais()
+        precos_hoje = {**yahoo_precos, **tesouro_precos, **manuais}
+        conn = get_conn()
+        cur = conn.cursor()
+        for ativo, preco in precos_hoje.items():
+            fonte = "yahoo" if ativo in yahoo_precos else ("tesouro" if ativo in tesouro_precos else "manual")
+            cur.execute("""
+                INSERT INTO precos_ativos (data, ativo, preco, fonte)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (data, ativo) DO UPDATE SET preco = EXCLUDED.preco
+            """, (data, ativo, preco, fonte))
+        conn.commit()
 
     # 3. Calcular retorno do dia
     carteira = get_carteira_vigente(data)
