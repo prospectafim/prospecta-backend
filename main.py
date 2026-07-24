@@ -176,29 +176,88 @@ def _seed_cdi():
 # ─────────────────────────────────────────────
 # BUSCA DE PREÇOS
 # ─────────────────────────────────────────────
+def fetch_yahoo_single(ticker: str) -> Optional[float]:
+    """Busca preço de um ticker via Yahoo Finance API v8 (sem yfinance)."""
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=5d"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+        }
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            logger.warning(f"Yahoo v8 {ticker}: HTTP {r.status_code}")
+            return None
+        data_json = r.json()
+        result = data_json.get("chart", {}).get("result", [])
+        if not result:
+            return None
+        closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        closes = [c for c in closes if c is not None]
+        return float(closes[-1]) if closes else None
+    except Exception as e:
+        logger.warning(f"Yahoo v8 {ticker}: {e}")
+        return None
+
+def fetch_yahoo_v2(ticker: str) -> Optional[float]:
+    """Busca preço via Yahoo Finance v7."""
+    try:
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=5d"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return None
+        data_json = r.json()
+        result = data_json.get("chart", {}).get("result", [])
+        if not result:
+            return None
+        closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        closes = [c for c in closes if c is not None]
+        return float(closes[-1]) if closes else None
+    except Exception as e:
+        logger.warning(f"Yahoo v2 {ticker}: {e}")
+        return None
+
 def fetch_yahoo(tickers: list, data: date) -> dict:
-    """Busca preços de fechamento do Yahoo Finance."""
+    """Busca preços de fechamento do Yahoo Finance — tenta múltiplos métodos."""
     precos = {}
+
+    # Método 1: yfinance library
     try:
         start = data - timedelta(days=5)
         end   = data + timedelta(days=1)
         raw = yf.download(
             tickers, start=start.isoformat(), end=end.isoformat(),
-            auto_adjust=True, progress=False, threads=True
+            auto_adjust=True, progress=False, threads=False
         )
-        if raw.empty:
-            return precos
-
-        close = raw["Close"] if len(tickers) > 1 else raw[["Close"]]
-        close.columns = tickers if len(tickers) > 1 else tickers
-
-        for t in tickers:
-            if t in close.columns:
-                series = close[t].dropna()
-                if not series.empty:
-                    precos[t] = float(series.iloc[-1])
+        if not raw.empty:
+            close = raw["Close"] if len(tickers) > 1 else raw[["Close"]]
+            if len(tickers) > 1:
+                close.columns = tickers
+            for t in tickers:
+                if t in close.columns:
+                    series = close[t].dropna()
+                    if not series.empty:
+                        precos[t] = float(series.iloc[-1])
+            if precos:
+                logger.info(f"  yfinance: {len(precos)}/{len(tickers)} preços")
+                return precos
     except Exception as e:
-        logger.error(f"Yahoo error: {e}")
+        logger.warning(f"yfinance failed: {e}")
+
+    # Método 2: Yahoo Finance API v8 diretamente
+    logger.info("  Tentando Yahoo Finance API v8...")
+    for t in tickers:
+        if t not in precos:
+            p = fetch_yahoo_single(t)
+            if p is None:
+                p = fetch_yahoo_v2(t)
+            if p is not None:
+                precos[t] = p
+            else:
+                logger.warning(f"  Sem preço para {t}")
+
+    logger.info(f"  Yahoo API: {len(precos)}/{len(tickers)} preços obtidos")
     return precos
 
 def fetch_tesouro(data: date) -> dict:
