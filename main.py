@@ -99,6 +99,7 @@ FUTUROS = {
     "EUR/BRL":  {"entrada": date(2026, 4, 24), "long": False, "notional": 0.08,  "preco_ref": "EURUSD"},
     "MXN/CAD":  {"entrada": date(2026, 4, 27), "long": True,  "notional": 0.03,  "preco_ref": "MXNCAD"},
     "SMAL11":   {"entrada": date(2026, 5, 29), "long": False, "notional": 0.025, "preco_ref": "SMAL11"},
+    "USD/JPY":  {"entrada": date(2026, 7, 30), "long": False, "notional": 0.10,  "preco_ref": "USDJPY", "ticker_b3": "JAPQ26", "preco_entrada": 163.40, "vencimento": date(2026, 8, 13)},
 }
 
 # ─────────────────────────────────────────────
