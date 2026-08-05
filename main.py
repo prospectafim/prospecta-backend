@@ -850,6 +850,143 @@ def delete_preco(ativo: str, data_str: str):
     except Exception as e:
         raise HTTPException(500, str(e))
 
+
+@app.get("/api/atribuicao")
+def get_atribuicao(mes: str):
+    """
+    Retorna a atribuição de performance por ativo num mês.
+    mes = 'YYYY-MM'
+    Retorna: lista de {ativo, peso, var_mes, contribuicao}
+    """
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Cotas do mês
+        cur.execute("""
+            SELECT data, cota FROM cotas_diarias
+            WHERE data >= %s AND data < %s
+            ORDER BY data
+        """, (mes + '-01', mes[:4] + '-' + str(int(mes[5:7]) + 1).zfill(2) + '-01'
+              if int(mes[5:7]) < 12
+              else str(int(mes[:4]) + 1) + '-01-01'))
+        cotas_mes = cur.fetchall()
+
+        if not cotas_mes:
+            raise HTTPException(404, "Sem cotas para este mês")
+
+        # Cota do último dia do mês anterior (para calcular retorno do mês)
+        cur.execute("""
+            SELECT cota FROM cotas_diarias
+            WHERE data < %s ORDER BY data DESC LIMIT 1
+        """, (mes + '-01',))
+        cota_ant = cur.fetchone()
+        cota_inicio = float(cota_ant['cota']) if cota_ant else 1.0
+
+        # Datas de início e fim do mês
+        data_inicio = str(cotas_mes[0]['data'])
+        data_fim    = str(cotas_mes[-1]['data'])
+
+        # Carteira vigente no mês
+        data_obj = date.fromisoformat(data_inicio)
+        carteira = get_carteira_vigente(data_obj)
+
+        resultado = []
+
+        for ativo, peso in carteira.items():
+            # Preço no início do mês (último preço antes ou no primeiro dia)
+            cur.execute("""
+                SELECT preco FROM precos_ativos
+                WHERE ativo = %s AND data <= %s
+                ORDER BY data DESC LIMIT 1
+            """, (ativo, data_inicio))
+            p_inicio = cur.fetchone()
+
+            # Preço no fim do mês
+            cur.execute("""
+                SELECT preco FROM precos_ativos
+                WHERE ativo = %s AND data <= %s
+                ORDER BY data DESC LIMIT 1
+            """, (ativo, data_fim))
+            p_fim = cur.fetchone()
+
+            if not p_inicio or not p_fim:
+                resultado.append({
+                    "ativo": ativo,
+                    "peso": round(peso, 4),
+                    "var_mes": None,
+                    "contribuicao": None,
+                    "sem_dados": True
+                })
+                continue
+
+            # Para ativos em USD, ajusta pelo câmbio
+            ativos_usd = {
+                "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
+                "Bitcoin","Swedish Gov Bond","Siemens Bond"
+            }
+
+            pi = float(p_inicio['preco'])
+            pf = float(p_fim['preco'])
+
+            if ativo in ativos_usd:
+                # Busca USD/BRL no início e fim do mês
+                cur.execute("""
+                    SELECT preco FROM precos_ativos
+                    WHERE ativo = 'USDBRL' AND data <= %s
+                    ORDER BY data DESC LIMIT 1
+                """, (data_inicio,))
+                fx_i = cur.fetchone()
+
+                cur.execute("""
+                    SELECT preco FROM precos_ativos
+                    WHERE ativo = 'USDBRL' AND data <= %s
+                    ORDER BY data DESC LIMIT 1
+                """, (data_fim,))
+                fx_f = cur.fetchone()
+
+                if fx_i and fx_f:
+                    val_inicio = pi * float(fx_i['preco'])
+                    val_fim    = pf * float(fx_f['preco'])
+                    var = val_fim / val_inicio - 1 if val_inicio > 0 else 0
+                else:
+                    var = pf / pi - 1 if pi > 0 else 0
+            else:
+                var = pf / pi - 1 if pi > 0 else 0
+
+            contribuicao = peso * var
+
+            resultado.append({
+                "ativo": ativo,
+                "peso": round(peso, 4),
+                "preco_inicio": round(pi, 4),
+                "preco_fim": round(pf, 4),
+                "var_mes": round(var, 6),
+                "contribuicao": round(contribuicao, 6),
+                "sem_dados": False
+            })
+
+        # Ordena por contribuição (piores primeiro)
+        resultado.sort(key=lambda x: (x.get('contribuicao') or 0))
+
+        cur.close()
+        conn.close()
+
+        ret_total = float(cotas_mes[-1]['cota']) / cota_inicio - 1 if cota_inicio > 0 else 0
+
+        return {
+            "mes": mes,
+            "data_inicio": data_inicio,
+            "data_fim": data_fim,
+            "retorno_mes": round(ret_total, 6),
+            "ativos": resultado
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 @app.get("/api/status")
 def get_status():
     """Retorna status do sistema e última atualização."""
