@@ -144,6 +144,15 @@ def init_db():
             data_ref   DATE NOT NULL,
             updated_at TIMESTAMP DEFAULT NOW()
         );
+
+        CREATE TABLE IF NOT EXISTS pesos_meta (
+            id         SERIAL PRIMARY KEY,
+            data_ini   DATE NOT NULL,
+            ativo      VARCHAR(64) NOT NULL,
+            peso       NUMERIC(8,6) NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(data_ini, ativo)
+        );
     """)
     conn.commit()
     cur.close()
@@ -355,6 +364,109 @@ def get_cota_anterior(data: date) -> tuple:
     if row:
         return row["data"], float(row["cota"]), float(row["pl"] or PL_INICIAL)
     return DATA_T0, COTA_T0, PL_INICIAL
+
+# ─────────────────────────────────────────────
+# PESOS DINÂMICOS
+# ─────────────────────────────────────────────
+def get_pesos_meta(data: date) -> dict:
+    """Retorna pesos meta da carteira vigente na data."""
+    return get_carteira_vigente(data)
+
+def calcular_pesos_reais(data: date) -> dict:
+    """
+    Calcula os pesos reais de cada ativo com base nos preços do dia anterior.
+    Peso real = (preco_atual * quantidade) / PL_total
+    Como não temos quantidades explícitas, derivamos do peso meta no rebalance
+    e aplicamos as variações de preço desde então.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Busca a última cota antes de hoje para ter o PL base
+    cur.execute("""
+        SELECT data, cota, pl FROM cotas_diarias
+        WHERE data < %s ORDER BY data DESC LIMIT 1
+    """, (data,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return get_carteira_vigente(data)
+
+    pl_base = float(row['pl'] or 10_000_000)
+    data_ant = row['data']
+
+    # Carteira meta vigente
+    carteira_meta = get_carteira_vigente(data)
+
+    # Para cada ativo, calcula valor atual = peso_meta * PL_base * (preco_hoje / preco_no_rebalance)
+    # Como simplificação, usamos a variação acumulada desde o último rebalance
+
+    # Encontra a data do último rebalance
+    ultima_data_rebalance = date(2025, 4, 30)
+    for rebalance_date, _ in CARTEIRAS:
+        if rebalance_date <= data:
+            ultima_data_rebalance = rebalance_date
+
+    ativos_usd = {
+        "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
+        "Bitcoin","Swedish Gov Bond","Siemens Bond"
+    }
+
+    valores_reais = {}
+    for ativo, peso_meta in carteira_meta.items():
+        # Preço no rebalance
+        cur.execute("""
+            SELECT preco FROM precos_ativos
+            WHERE ativo = %s AND data >= %s
+            ORDER BY data ASC LIMIT 1
+        """, (ativo, ultima_data_rebalance))
+        p_rebalance = cur.fetchone()
+
+        # Preço mais recente
+        cur.execute("""
+            SELECT preco FROM precos_ativos
+            WHERE ativo = %s AND data <= %s
+            ORDER BY data DESC LIMIT 1
+        """, (ativo, data_ant))
+        p_atual = cur.fetchone()
+
+        if not p_rebalance or not p_atual:
+            valores_reais[ativo] = peso_meta * pl_base
+            continue
+
+        pr = float(p_rebalance['preco'])
+        pa = float(p_atual['preco'])
+
+        if ativo in ativos_usd:
+            # Ajusta pelo câmbio
+            cur.execute("""
+                SELECT preco FROM precos_ativos
+                WHERE ativo = 'USDBRL' AND data >= %s ORDER BY data ASC LIMIT 1
+            """, (ultima_data_rebalance,))
+            fx_r = cur.fetchone()
+            cur.execute("""
+                SELECT preco FROM precos_ativos
+                WHERE ativo = 'USDBRL' AND data <= %s ORDER BY data DESC LIMIT 1
+            """, (data_ant,))
+            fx_a = cur.fetchone()
+            if fx_r and fx_a:
+                var = (pa * float(fx_a['preco'])) / (pr * float(fx_r['preco'])) if pr > 0 else 1
+            else:
+                var = pa / pr if pr > 0 else 1
+        else:
+            var = pa / pr if pr > 0 else 1
+
+        valores_reais[ativo] = peso_meta * pl_base * var
+
+    cur.close(); conn.close()
+
+    # Normaliza para percentual (soma = 100%)
+    total = sum(valores_reais.values())
+    if total <= 0:
+        return carteira_meta
+
+    pesos_reais = {a: v / total for a, v in valores_reais.items()}
+    return pesos_reais
 
 # ─────────────────────────────────────────────
 # BATIMENTO PRINCIPAL
@@ -984,6 +1096,141 @@ def get_atribuicao(mes: str):
 
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/pesos-reais")
+def get_pesos_reais():
+    """
+    Retorna pesos meta e pesos reais de cada ativo com desvio calculado.
+    Alerta quando desvio >= 3 pontos percentuais.
+    """
+    try:
+        hoje = date.today()
+        pesos_meta   = get_pesos_meta(hoje)
+        pesos_reais  = calcular_pesos_reais(hoje)
+
+        resultado = []
+        for ativo, peso_meta in pesos_meta.items():
+            peso_real = pesos_reais.get(ativo, peso_meta)
+            desvio    = peso_real - peso_meta
+            alerta    = abs(desvio) >= 0.03  # 3 pontos percentuais
+
+            resultado.append({
+                "ativo":      ativo,
+                "peso_meta":  round(peso_meta, 4),
+                "peso_real":  round(peso_real, 4),
+                "desvio":     round(desvio, 4),
+                "alerta":     alerta,
+            })
+
+        # Ordena por desvio absoluto (maiores desvios primeiro)
+        resultado.sort(key=lambda x: abs(x["desvio"]), reverse=True)
+
+        alertas = [r for r in resultado if r["alerta"]]
+
+        return {
+            "data":    str(hoje),
+            "ativos":  resultado,
+            "n_alertas": len(alertas),
+            "alertas": alertas,
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+def calcular_pesos_reais(data: date) -> dict:
+    """
+    Calcula os pesos reais de cada ativo com base nos preços do dia anterior.
+    Retorna {ativo: peso_real} onde a soma é ~1.0
+    """
+    carteira = get_carteira_vigente(data)
+    if not carteira:
+        return {}
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Busca o último preço de cada ativo antes da data
+    precos = {}
+    usdbrl_row = None
+
+    cur.execute("""
+        SELECT preco FROM precos_ativos
+        WHERE ativo = 'USDBRL' AND data < %s
+        ORDER BY data DESC LIMIT 1
+    """, (data,))
+    fx_row = cur.fetchone()
+    usdbrl = float(fx_row['preco']) if fx_row else 1.0
+
+    ativos_usd = {
+        "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
+        "Bitcoin","Swedish Gov Bond","Siemens Bond"
+    }
+
+    valores = {}
+    for ativo, peso_meta in carteira.items():
+        cur.execute("""
+            SELECT preco FROM precos_ativos
+            WHERE ativo = %s AND data < %s
+            ORDER BY data DESC LIMIT 1
+        """, (ativo, data))
+        row = cur.fetchone()
+        if row:
+            preco = float(row['preco'])
+            # Converte USD → BRL se necessário
+            val = preco * usdbrl if ativo in ativos_usd else preco
+            valores[ativo] = val * peso_meta  # valor proporcional ao peso meta inicial
+        else:
+            valores[ativo] = peso_meta  # fallback: usa peso meta
+
+    cur.close()
+    conn.close()
+
+    total = sum(valores.values())
+    if total == 0:
+        return {a: p for a, p in carteira.items()}
+
+    return {ativo: round(val / total, 6) for ativo, val in valores.items()}
+
+
+@app.get("/api/pesos-reais")
+def get_pesos_reais_endpoint(data_str: Optional[str] = None):
+    """
+    Retorna pesos meta e pesos reais de cada ativo.
+    Inclui desvio e alerta se desvio > 3pp.
+    """
+    try:
+        data = date.fromisoformat(data_str) if data_str else date.today()
+        carteira = get_carteira_vigente(data)
+        pesos_reais = calcular_pesos_reais(data)
+
+        resultado = []
+        for ativo, peso_meta in carteira.items():
+            peso_real = pesos_reais.get(ativo, peso_meta)
+            desvio = peso_real - peso_meta
+            alerta = abs(desvio) >= 0.03  # alerta se desvio >= 3pp
+
+            resultado.append({
+                "ativo": ativo,
+                "peso_meta": round(peso_meta, 4),
+                "peso_real": round(peso_real, 4),
+                "desvio": round(desvio, 4),
+                "alerta": alerta,
+            })
+
+        # Ordena por desvio absoluto (maiores desvios primeiro)
+        resultado.sort(key=lambda x: abs(x['desvio']), reverse=True)
+
+        alertas = [r for r in resultado if r['alerta']]
+
+        return {
+            "data": str(data),
+            "ativos": resultado,
+            "num_alertas": len(alertas),
+            "alertas": alertas,
+        }
     except Exception as e:
         raise HTTPException(500, str(e))
 
