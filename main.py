@@ -52,6 +52,7 @@ YAHOO_TICKERS = {
     "UTLL11.SA":"UTLL11",
     "RAIL3.SA": "RAIL3",
     "SMAL11.SA":"SMAL11",
+    "CURY3.SA": "CURY3",
 }
 
 # Carteiras históricas: (data, {ativo: peso})
@@ -92,13 +93,19 @@ CARTEIRAS = [
         "CPER":0.025,"URNM":0.02,"REMX":0.02,"RAIL3":0.02,
         "CORN":0.015,"CANE":0.01,"Bitcoin":0.01,
     }),
+    (date(2026, 8, 6), {
+        "LFT 2031":0.240,"NTN-B 2029":0.195,"NTN-B 2035":0.145,
+        "STIP":0.070,"IAU":0.050,"IVV":0.040,
+        "BOVA11":0.050,"UTLL11":0.040,"RAIL3":0.020,"CURY3":0.030,
+        "CPER":0.025,"CORN":0.025,"CANE":0.020,
+        "URNM":0.020,"REMX":0.020,"Bitcoin":0.010,
+    }),
 ]
 
 # Futuros/derivativos
 FUTUROS = {
     "EUR/BRL":  {"entrada": date(2026, 4, 24), "long": False, "notional": 0.08,  "preco_ref": "EURUSD"},
     "MXN/CAD":  {"entrada": date(2026, 4, 27), "long": True,  "notional": 0.03,  "preco_ref": "MXNCAD"},
-    "SMAL11":   {"entrada": date(2026, 5, 29), "long": False, "notional": 0.025, "preco_ref": "SMAL11"},
     "USD/JPY":  {"entrada": date(2026, 7, 30), "long": False, "notional": 0.10,  "preco_ref": "USDJPY", "ticker_b3": "JAPQ26", "preco_entrada": 159.82, "vencimento": date(2026, 8, 13)},
 }
 
