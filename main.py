@@ -277,30 +277,84 @@ def fetch_yahoo(tickers: list, data: date) -> dict:
     return precos
 
 def fetch_tesouro(data: date) -> dict:
-    """Busca PU dos títulos do Tesouro Direto via API pública."""
+    """Busca PU dos títulos do Tesouro Direto via múltiplos endpoints."""
     precos = {}
-    try:
-        url = "https://www.tesourodireto.com.br/json/br/com/b3/tesourodireto/model/dto/TesouroDiretoDto.json"
-        r = requests.get(url, timeout=10)
-        if r.status_code != 200:
-            return precos
-        dados = r.json()
-        titulos = dados.get("response", {}).get("TrsrBdTradgList", [])
-        mapa = {
-            "Tesouro Selic 2031":   "LFT 2031",
-            "Tesouro IPCA+ 2029":   "NTN-B 2029",
-            "Tesouro IPCA+ 2035":   "NTN-B 2035",
-            "Tesouro IPCA+ 2040":   "NTN-B 2040",
-            "Tesouro Prefixado 2032":"LTN 2032",
-        }
-        for t in titulos:
-            nome = t.get("TrsrBd", {}).get("nm", "")
-            pu   = t.get("TrsrBd", {}).get("untrRedVal", None)
-            for nome_td, nome_interno in mapa.items():
-                if nome_td in nome and pu:
-                    precos[nome_interno] = float(pu)
-    except Exception as e:
-        logger.error(f"Tesouro error: {e}")
+    mapa = {
+        "Tesouro Selic 2031":    "LFT 2031",
+        "Tesouro IPCA+ 2029":    "NTN-B 2029",
+        "Tesouro IPCA+ 2035":    "NTN-B 2035",
+        "Tesouro IPCA+ 2040":    "NTN-B 2040",
+        "Tesouro Prefixado 2032":"LTN 2032",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.tesourodireto.com.br/",
+        "Origin": "https://www.tesourodireto.com.br",
+    }
+
+    urls = [
+        "https://www.tesourodireto.com.br/json/br/com/b3/tesourodireto/model/dto/TesouroDiretoDto.json",
+        "https://www.tesourodireto.com.br/json/br/com/b3/tesourodireto/tesouro-direto/prices-and-rates/today.json",
+    ]
+
+    for url in urls:
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code != 200:
+                logger.warning(f"Tesouro URL {url}: HTTP {r.status_code}")
+                continue
+            dados = r.json()
+            titulos = dados.get("response", {}).get("TrsrBdTradgList", [])
+            if not titulos:
+                continue
+            for t in titulos:
+                bd = t.get("TrsrBd", {})
+                nome = bd.get("nm", "")
+                pu   = bd.get("untrRedVal", None)
+                if not pu:
+                    pu = bd.get("minRedVal", None)
+                for nome_td, nome_interno in mapa.items():
+                    if nome_td in nome and pu:
+                        precos[nome_interno] = float(pu)
+            if precos:
+                logger.info(f"Tesouro: {len(precos)} PUs via {url}")
+                return precos
+        except Exception as e:
+            logger.warning(f"Tesouro {url}: {e}")
+            continue
+
+    # Fallback: BCB API para Selic acumulada (calcula PU aproximado da LFT)
+    if not precos:
+        try:
+            logger.warning("Tesouro: tentando fallback BCB para LFT...")
+            r_bcb = requests.get(
+                "https://api.bcb.gov.br/dados/serie/bcdata.sgs.11/dados/ultimos/2?formato=json",
+                timeout=10
+            )
+            if r_bcb.status_code == 200:
+                selic_data = r_bcb.json()
+                if selic_data:
+                    taxa_diaria = float(selic_data[-1]['valor']) / 100
+                    # Estima PU da LFT usando ultimo PU conhecido + taxa diaria
+                    conn_tmp = get_conn()
+                    cur_tmp = conn_tmp.cursor()
+                    cur_tmp.execute("""
+                        SELECT preco FROM precos_ativos
+                        WHERE ativo = 'LFT 2031' AND data < %s
+                        ORDER BY data DESC LIMIT 1
+                    """, (data,))
+                    row = cur_tmp.fetchone()
+                    cur_tmp.close()
+                    conn_tmp.close()
+                    if row:
+                        pu_anterior = float(row['preco'])
+                        fator = 1 + taxa_diaria / 100
+                        precos['LFT 2031'] = round(pu_anterior * fator, 6)
+                        logger.info(f"LFT 2031 PU estimado via BCB Selic: {precos['LFT 2031']}")
+        except Exception as e:
+            logger.warning(f"Fallback BCB: {e}")
+
     return precos
 
 def fetch_bcb_cdi(mes: str) -> Optional[float]:
