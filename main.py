@@ -27,6 +27,13 @@ from psycopg2.extras import RealDictCursor
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ── ANBIMA API ──
+ANBIMA_CLIENT_ID     = os.environ.get("ANBIMA_CLIENT_ID", "x8eeOKFhWwvF")
+ANBIMA_CLIENT_SECRET = os.environ.get("ANBIMA_CLIENT_SECRET", "0AZiRk0E4rON")
+ANBIMA_TOKEN_URL     = "https://api.anbima.com.br/oauth/access-token"
+ANBIMA_API_BASE      = "https://api.anbima.com.br/feed/precos-indices/v1"
+_anbima_token_cache: dict = {"token": None, "expires_at": 0}
+
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
@@ -276,9 +283,122 @@ def fetch_yahoo(tickers: list, data: date) -> dict:
     logger.info(f"  Yahoo API: {len(precos)}/{len(tickers)} preços obtidos")
     return precos
 
-def fetch_tesouro(data: date) -> dict:
-    """Busca PU dos títulos do Tesouro Direto via múltiplos endpoints."""
+def get_anbima_token() -> Optional[str]:
+    """Obtém token OAuth2 da ANBIMA com cache."""
+    import time
+    now = time.time()
+    if _anbima_token_cache["token"] and now < _anbima_token_cache["expires_at"] - 60:
+        return _anbima_token_cache["token"]
+    try:
+        r = requests.post(
+            ANBIMA_TOKEN_URL,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": ANBIMA_CLIENT_ID,
+                "client_secret": ANBIMA_CLIENT_SECRET,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            logger.error(f"ANBIMA token error: {r.status_code} {r.text[:200]}")
+            return None
+        data = r.json()
+        _anbima_token_cache["token"] = data["access_token"]
+        _anbima_token_cache["expires_at"] = now + int(data.get("expires_in", 3600))
+        logger.info("ANBIMA token obtido com sucesso")
+        return _anbima_token_cache["token"]
+    except Exception as e:
+        logger.error(f"ANBIMA token exception: {e}")
+        return None
+
+
+def fetch_anbima_pu(data_ref: date) -> dict:
+    """Busca PUs do mercado secundário via ANBIMA API."""
     precos = {}
+    token = get_anbima_token()
+    if not token:
+        return precos
+
+    # Mapeamento: tipo_titulo + data_vencimento → nome interno
+    MAPA = {
+        ("LFT",  "2031-03-01"): "LFT 2031",
+        ("LFT",  "2031-09-01"): "LFT 2031",
+        ("NTN-B","2029-05-15"): "NTN-B 2029",
+        ("NTN-B","2035-05-15"): "NTN-B 2035",
+        ("NTN-B","2040-05-15"): "NTN-B 2040",
+        ("LTN",  "2032-01-01"): "LTN 2032",
+    }
+
+    try:
+        url = f"{ANBIMA_API_BASE}/titulos-publicos/mercado-secundario-TPF"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        params = {"data": data_ref.strftime("%Y-%m-%d")}
+        r = requests.get(url, headers=headers, params=params, timeout=15)
+
+        if r.status_code == 200:
+            titulos = r.json() if isinstance(r.json(), list) else r.json().get("TrsrBdTradgList", [])
+            for t in titulos:
+                tipo  = t.get("tipo_titulo", "")
+                venc  = t.get("data_vencimento", "")[:10]
+                pu    = t.get("pu")
+                if not pu:
+                    continue
+                # Tenta match exato
+                chave = (tipo, venc)
+                if chave in MAPA:
+                    precos[MAPA[chave]] = float(pu)
+                    continue
+                # Tenta match parcial por tipo + ano de vencimento
+                for (t_tipo, t_venc), nome in MAPA.items():
+                    if tipo == t_tipo and venc[:4] == t_venc[:4]:
+                        precos[nome] = float(pu)
+            if precos:
+                logger.info(f"ANBIMA mercado-secundário: {len(precos)} PUs para {data_ref}")
+                return precos
+        else:
+            logger.warning(f"ANBIMA mercado-secundário: HTTP {r.status_code}")
+    except Exception as e:
+        logger.warning(f"ANBIMA mercado-secundário: {e}")
+
+    # Fallback: VNA endpoint (LFT e NTN-B)
+    try:
+        url_vna = f"{ANBIMA_API_BASE}/titulos-publicos/vna"
+        r2 = requests.get(url_vna, headers={"Authorization": f"Bearer {token}"},
+                          params={"data": data_ref.strftime("%Y-%m-%d")}, timeout=15)
+        if r2.status_code == 200:
+            items = r2.json() if isinstance(r2.json(), list) else []
+            for item in items:
+                titulo = item.get("titulos", "")
+                vna    = item.get("vna")
+                if not vna:
+                    continue
+                if "LFT" in titulo:
+                    precos["LFT 2031"] = float(vna)
+                elif "NTN-B" in titulo:
+                    if "NTN-B 2029" not in precos:
+                        precos["NTN-B 2029"] = float(vna)
+            if precos:
+                logger.info(f"ANBIMA VNA fallback: {len(precos)} para {data_ref}")
+    except Exception as e:
+        logger.warning(f"ANBIMA VNA: {e}")
+
+    return precos
+
+
+def fetch_tesouro(data: date) -> dict:
+    """Busca PU dos títulos do Tesouro — usa ANBIMA como fonte primária."""
+    # Tenta ANBIMA primeiro
+    precos = fetch_anbima_pu(data)
+    if precos:
+        return precos
+
+    logger.warning("ANBIMA falhou — tentando Tesouro Direto direto...")
+
+    # Fallback: Tesouro Direto API
     mapa = {
         "Tesouro Selic 2031":    "LFT 2031",
         "Tesouro IPCA+ 2029":    "NTN-B 2029",
@@ -287,47 +407,33 @@ def fetch_tesouro(data: date) -> dict:
         "Tesouro Prefixado 2032":"LTN 2032",
     }
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "application/json",
         "Referer": "https://www.tesourodireto.com.br/",
-        "Origin": "https://www.tesourodireto.com.br",
     }
-
-    urls = [
+    for url in [
         "https://www.tesourodireto.com.br/json/br/com/b3/tesourodireto/model/dto/TesouroDiretoDto.json",
         "https://www.tesourodireto.com.br/json/br/com/b3/tesourodireto/tesouro-direto/prices-and-rates/today.json",
-    ]
-
-    for url in urls:
+    ]:
         try:
             r = requests.get(url, headers=headers, timeout=15)
             if r.status_code != 200:
-                logger.warning(f"Tesouro URL {url}: HTTP {r.status_code}")
                 continue
-            dados = r.json()
-            titulos = dados.get("response", {}).get("TrsrBdTradgList", [])
-            if not titulos:
-                continue
+            titulos = r.json().get("response", {}).get("TrsrBdTradgList", [])
             for t in titulos:
-                bd = t.get("TrsrBd", {})
-                nome = bd.get("nm", "")
-                pu   = bd.get("untrRedVal", None)
-                if not pu:
-                    pu = bd.get("minRedVal", None)
-                for nome_td, nome_interno in mapa.items():
+                nome = t.get("TrsrBd", {}).get("nm", "")
+                pu   = t.get("TrsrBd", {}).get("untrRedVal")
+                for nome_td, nome_int in mapa.items():
                     if nome_td in nome and pu:
-                        precos[nome_interno] = float(pu)
+                        precos[nome_int] = float(pu)
             if precos:
-                logger.info(f"Tesouro: {len(precos)} PUs via {url}")
                 return precos
         except Exception as e:
             logger.warning(f"Tesouro {url}: {e}")
-            continue
 
-    # Fallback: BCB API para Selic acumulada (calcula PU aproximado da LFT)
+    # Último recurso: estima LFT via Selic BCB
     if not precos:
         try:
-            logger.warning("Tesouro: tentando fallback BCB para LFT...")
             r_bcb = requests.get(
                 "https://api.bcb.gov.br/dados/serie/bcdata.sgs.11/dados/ultimos/2?formato=json",
                 timeout=10
@@ -336,7 +442,6 @@ def fetch_tesouro(data: date) -> dict:
                 selic_data = r_bcb.json()
                 if selic_data:
                     taxa_diaria = float(selic_data[-1]['valor']) / 100
-                    # Estima PU da LFT usando ultimo PU conhecido + taxa diaria
                     conn_tmp = get_conn()
                     cur_tmp = conn_tmp.cursor()
                     cur_tmp.execute("""
@@ -348,12 +453,11 @@ def fetch_tesouro(data: date) -> dict:
                     cur_tmp.close()
                     conn_tmp.close()
                     if row:
-                        pu_anterior = float(row['preco'])
-                        fator = 1 + taxa_diaria / 100
-                        precos['LFT 2031'] = round(pu_anterior * fator, 6)
-                        logger.info(f"LFT 2031 PU estimado via BCB Selic: {precos['LFT 2031']}")
+                        pu_ant = float(row['preco'])
+                        precos['LFT 2031'] = round(pu_ant * (1 + taxa_diaria / 100), 6)
+                        logger.info(f"LFT estimado via BCB: {precos['LFT 2031']}")
         except Exception as e:
-            logger.warning(f"Fallback BCB: {e}")
+            logger.warning(f"BCB fallback: {e}")
 
     return precos
 
