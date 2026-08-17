@@ -1422,6 +1422,137 @@ def get_pesos_reais_endpoint(data_str: Optional[str] = None):
     except Exception as e:
         raise HTTPException(500, str(e))
 
+
+@app.post("/api/preco-manual")
+def inserir_preco_manual(payload: dict):
+    """Insere ou atualiza preco de um ativo no banco."""
+    try:
+        data_str = payload.get("data")
+        ativo    = payload.get("ativo")
+        preco    = payload.get("preco")
+        fonte    = payload.get("fonte", "manual")
+        if not data_str or not ativo or preco is None:
+            raise HTTPException(400, "data, ativo e preco sao obrigatorios")
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute("""
+            INSERT INTO precos_ativos (data, ativo, preco, fonte)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (data, ativo) DO UPDATE SET preco = EXCLUDED.preco, fonte = EXCLUDED.fonte
+        """, (data_str, ativo, float(preco), fonte))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"ok": True, "data": data_str, "ativo": ativo, "preco": preco}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/batimento-historico")
+def batimento_historico(payload: dict):
+    """Recalcula a cota de um dia especifico usando precos ja salvos no banco."""
+    try:
+        data_str = payload.get("data")
+        if not data_str:
+            raise HTTPException(400, "data obrigatoria")
+        data_obj = date.fromisoformat(data_str)
+
+        conn = get_conn()
+        cur  = conn.cursor()
+
+        # Carteira vigente nessa data
+        carteira = get_carteira_vigente(data_obj)
+
+        # Cota do dia anterior
+        cur.execute("""
+            SELECT cota FROM cotas_diarias
+            WHERE data < %s ORDER BY data DESC LIMIT 1
+        """, (data_obj,))
+        row_ant = cur.fetchone()
+        cota_anterior = float(row_ant['cota']) if row_ant else 1.0
+
+        # Calcula retorno com precos do banco
+        retorno_total = 0.0
+        ativos_usd = {
+            "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
+            "Bitcoin","Swedish Gov Bond","Siemens Bond","CURY3"
+        }
+
+        # Cambio do dia
+        cur.execute("""
+            SELECT preco FROM precos_ativos
+            WHERE ativo = 'USDBRL' AND data <= %s
+            ORDER BY data DESC LIMIT 1
+        """, (data_obj,))
+        fx_row = cur.fetchone()
+        usdbrl_hoje = float(fx_row['preco']) if fx_row else None
+
+        cur.execute("""
+            SELECT preco FROM precos_ativos
+            WHERE ativo = 'USDBRL' AND data < %s
+            ORDER BY data DESC LIMIT 1
+        """, (data_obj,))
+        fx_ant_row = cur.fetchone()
+        usdbrl_ant = float(fx_ant_row['preco']) if fx_ant_row else None
+
+        for ativo, peso in carteira.items():
+            cur.execute("""
+                SELECT preco FROM precos_ativos
+                WHERE ativo = %s AND data <= %s
+                ORDER BY data DESC LIMIT 1
+            """, (ativo, data_obj))
+            p_hoje = cur.fetchone()
+
+            cur.execute("""
+                SELECT preco FROM precos_ativos
+                WHERE ativo = %s AND data < %s
+                ORDER BY data DESC LIMIT 1
+            """, (ativo, data_obj))
+            p_ant = cur.fetchone()
+
+            if not p_hoje or not p_ant:
+                continue
+
+            ph = float(p_hoje['preco'])
+            pa = float(p_ant['preco'])
+            if pa <= 0:
+                continue
+
+            if ativo in ativos_usd and usdbrl_hoje and usdbrl_ant and usdbrl_ant > 0:
+                ret = (ph * usdbrl_hoje) / (pa * usdbrl_ant) - 1
+            else:
+                ret = ph / pa - 1
+
+            retorno_total += peso * ret
+
+        nova_cota = round(cota_anterior * (1 + retorno_total), 10)
+        pl_novo   = round(nova_cota * 10_000_000, 2)
+
+        cur.execute("""
+            INSERT INTO cotas_diarias (data, cota, retorno_dia, pl)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (data) DO UPDATE
+            SET cota = EXCLUDED.cota,
+                retorno_dia = EXCLUDED.retorno_dia,
+                pl = EXCLUDED.pl
+        """, (data_obj, nova_cota, retorno_total, pl_novo))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {
+            "data": data_str,
+            "cota": nova_cota,
+            "retorno": retorno_total,
+            "pl": pl_novo
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 @app.get("/api/status")
 def get_status():
     """Retorna status do sistema e última atualização."""
