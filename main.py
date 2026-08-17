@@ -106,7 +106,6 @@ CARTEIRAS = [
 FUTUROS = {
     "EUR/BRL":  {"entrada": date(2026, 4, 24), "long": False, "notional": 0.08,  "preco_ref": "EURUSD"},
     "MXN/CAD":  {"entrada": date(2026, 4, 27), "long": True,  "notional": 0.03,  "preco_ref": "MXNCAD"},
-    "USD/JPY":  {"entrada": date(2026, 7, 30), "long": False, "notional": 0.10,  "preco_ref": "USDJPY", "ticker_b3": "JAPQ26", "preco_entrada": 159.82, "vencimento": date(2026, 8, 13)},
 }
 
 # ─────────────────────────────────────────────
