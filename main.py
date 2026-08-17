@@ -284,23 +284,25 @@ def fetch_yahoo(tickers: list, data: date) -> dict:
     return precos
 
 def get_anbima_token() -> Optional[str]:
-    """Obtém token OAuth2 da ANBIMA com cache."""
-    import time
+    """Obtém token OAuth2 da ANBIMA com cache (Basic Auth)."""
+    import time, base64
     now = time.time()
     if _anbima_token_cache["token"] and now < _anbima_token_cache["expires_at"] - 60:
         return _anbima_token_cache["token"]
     try:
+        credentials = base64.b64encode(
+            f"{ANBIMA_CLIENT_ID}:{ANBIMA_CLIENT_SECRET}".encode()
+        ).decode()
         r = requests.post(
             ANBIMA_TOKEN_URL,
-            data={
-                "grant_type": "client_credentials",
-                "client_id": ANBIMA_CLIENT_ID,
-                "client_secret": ANBIMA_CLIENT_SECRET,
+            data={"grant_type": "client_credentials"},
+            headers={
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/x-www-form-urlencoded",
             },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=15,
         )
-        if r.status_code != 200:
+        if r.status_code not in (200, 201):
             logger.error(f"ANBIMA token error: {r.status_code} {r.text[:200]}")
             return None
         data = r.json()
@@ -314,77 +316,95 @@ def get_anbima_token() -> Optional[str]:
 
 
 def fetch_anbima_pu(data_ref: date) -> dict:
-    """Busca PUs do mercado secundário via ANBIMA API."""
+    """
+    Calcula PUs dos Tesouros via BCB API:
+    - LFT: PU cresce pela Selic over diária (formula exata)
+    - NTN-B: VNA cresce pelo IPCA diário (projetado via BCB)
+    """
     precos = {}
-    token = get_anbima_token()
-    if not token:
-        return precos
-
-    # Mapeamento: tipo_titulo + data_vencimento → nome interno
-    MAPA = {
-        ("LFT",  "2031-03-01"): "LFT 2031",
-        ("LFT",  "2031-09-01"): "LFT 2031",
-        ("NTN-B","2029-05-15"): "NTN-B 2029",
-        ("NTN-B","2035-05-15"): "NTN-B 2035",
-        ("NTN-B","2040-05-15"): "NTN-B 2040",
-        ("LTN",  "2032-01-01"): "LTN 2032",
-    }
 
     try:
-        url = f"{ANBIMA_API_BASE}/titulos-publicos/mercado-secundario-TPF"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-        params = {"data": data_ref.strftime("%Y-%m-%d")}
-        r = requests.get(url, headers=headers, params=params, timeout=15)
+        # ── LFT 2031: PU = PU_anterior × (1 + Selic_over_dia/100) ──
+        # Busca Selic over do dia (serie 11 BCB)
+        data_str = data_ref.strftime("%d/%m/%Y")
+        r_selic = requests.get(
+            f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.11/dados"
+            f"?formato=json&dataInicial={data_str}&dataFinal={data_str}",
+            timeout=10
+        )
+        if r_selic.status_code == 200:
+            selic_data = r_selic.json()
+            if selic_data:
+                taxa_selic_dia = float(selic_data[0]['valor']) / 100
 
-        if r.status_code == 200:
-            titulos = r.json() if isinstance(r.json(), list) else r.json().get("TrsrBdTradgList", [])
-            for t in titulos:
-                tipo  = t.get("tipo_titulo", "")
-                venc  = t.get("data_vencimento", "")[:10]
-                pu    = t.get("pu")
-                if not pu:
-                    continue
-                # Tenta match exato
-                chave = (tipo, venc)
-                if chave in MAPA:
-                    precos[MAPA[chave]] = float(pu)
-                    continue
-                # Tenta match parcial por tipo + ano de vencimento
-                for (t_tipo, t_venc), nome in MAPA.items():
-                    if tipo == t_tipo and venc[:4] == t_venc[:4]:
-                        precos[nome] = float(pu)
-            if precos:
-                logger.info(f"ANBIMA mercado-secundário: {len(precos)} PUs para {data_ref}")
-                return precos
-        else:
-            logger.warning(f"ANBIMA mercado-secundário: HTTP {r.status_code}")
+                # Busca ultimo PU da LFT no banco
+                conn = get_conn()
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT preco FROM precos_ativos
+                    WHERE ativo = 'LFT 2031' AND data < %s
+                    ORDER BY data DESC LIMIT 1
+                """, (data_ref,))
+                row = cur.fetchone()
+                cur.close()
+                conn.close()
+
+                if row and float(row['preco']) > 0:
+                    pu_ant = float(row['preco'])
+                    # Fator de crescimento diário da Selic
+                    fator = (1 + taxa_selic_dia / 100) ** (1/252) if taxa_selic_dia > 1 else (1 + taxa_selic_dia / 100)
+                    # Selic over ja é taxa diária efetiva
+                    pu_lft = round(pu_ant * (1 + taxa_selic_dia / 100), 6)
+                    precos['LFT 2031'] = pu_lft
+                    logger.info(f"LFT 2031 PU calculado via Selic BCB: {pu_lft} (taxa={taxa_selic_dia}%)")
     except Exception as e:
-        logger.warning(f"ANBIMA mercado-secundário: {e}")
+        logger.warning(f"LFT BCB calc: {e}")
 
-    # Fallback: VNA endpoint (LFT e NTN-B)
     try:
-        url_vna = f"{ANBIMA_API_BASE}/titulos-publicos/vna"
-        r2 = requests.get(url_vna, headers={"Authorization": f"Bearer {token}"},
-                          params={"data": data_ref.strftime("%Y-%m-%d")}, timeout=15)
-        if r2.status_code == 200:
-            items = r2.json() if isinstance(r2.json(), list) else []
-            for item in items:
-                titulo = item.get("titulos", "")
-                vna    = item.get("vna")
-                if not vna:
-                    continue
-                if "LFT" in titulo:
-                    precos["LFT 2031"] = float(vna)
-                elif "NTN-B" in titulo:
-                    if "NTN-B 2029" not in precos:
-                        precos["NTN-B 2029"] = float(vna)
-            if precos:
-                logger.info(f"ANBIMA VNA fallback: {len(precos)} para {data_ref}")
+        # ── NTN-B: VNA cresce com IPCA ──
+        # Busca VNA atual da NTN-B via BCB (série 13521 = VNA NTN-B)
+        r_vna = requests.get(
+            "https://api.bcb.gov.br/dados/serie/bcdata.sgs.13521/dados/ultimos/2?formato=json",
+            timeout=10
+        )
+        if r_vna.status_code == 200:
+            vna_data = r_vna.json()
+            if vna_data:
+                vna_atual = float(vna_data[-1]['valor'])
+                # Para NTN-B, PU = VNA × Fator_cupom_e_taxa
+                # Sem a taxa de mercado, usamos o último PU ajustado pelo VNA
+                conn = get_conn()
+                cur = conn.cursor()
+
+                for titulo in ['NTN-B 2029', 'NTN-B 2035']:
+                    cur.execute("""
+                        SELECT preco, data FROM precos_ativos
+                        WHERE ativo = %s AND data < %s
+                        ORDER BY data DESC LIMIT 1
+                    """, (titulo, data_ref))
+                    row_b = cur.fetchone()
+
+                    if row_b and float(row_b['preco']) > 0:
+                        # Busca VNA na data do último preço
+                        data_ult = str(row_b['data'])
+                        data_ult_str = f"{data_ult[8:10]}/{data_ult[5:7]}/{data_ult[:4]}"
+                        r_vna_ant = requests.get(
+                            f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.13521/dados"
+                            f"?formato=json&dataInicial={data_ult_str}&dataFinal={data_ult_str}",
+                            timeout=10
+                        )
+                        if r_vna_ant.status_code == 200 and r_vna_ant.json():
+                            vna_ant = float(r_vna_ant.json()[0]['valor'])
+                            if vna_ant > 0:
+                                fator_vna = vna_atual / vna_ant
+                                pu_novo = round(float(row_b['preco']) * fator_vna, 6)
+                                precos[titulo] = pu_novo
+                                logger.info(f"{titulo} PU atualizado via VNA BCB: {pu_novo}")
+
+                cur.close()
+                conn.close()
     except Exception as e:
-        logger.warning(f"ANBIMA VNA: {e}")
+        logger.warning(f"NTN-B VNA BCB calc: {e}")
 
     return precos
 
