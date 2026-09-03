@@ -113,6 +113,13 @@ CARTEIRAS = [
 FUTUROS = {
     "EUR/BRL":  {"entrada": date(2026, 4, 24), "long": False, "notional": 0.08,  "preco_ref": "EURUSD"},
     "MXN/CAD":  {"entrada": date(2026, 4, 27), "long": True,  "notional": 0.03,  "preco_ref": "MXNCAD"},
+    "DI1F31":   {
+        "entrada": date(2026, 9, 3), "long": False, "notional": None,
+        "preco_ref": "DI1F31", "tipo": "DI_futuro",
+        "contratos": 50, "pu_entrada": 56639.60, "taxa_entrada": 14.17,
+        "vencimento": date(2031, 1, 2), "dv01": 12177,
+        "tese": "Fechamento de 50bps — subposicionamento em RF + momentum político Flávio Bolsonaro"
+    },
 }
 
 # ─────────────────────────────────────────────
@@ -966,24 +973,6 @@ def trigger_batimento(data_str: Optional[str] = None):
     except Exception as e:
         raise HTTPException(500, str(e))
 
-@app.put("/api/preco-manual")
-def upsert_preco_manual(ativo: str, preco: float, data_ref: str):
-    """
-    Atualiza preço manual de um ativo (Swedish Bond, Siemens Bond, etc).
-    Chamado pelo Hub quando você insere um preço manualmente.
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO precos_manuais (ativo, preco, data_ref)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (ativo) DO UPDATE
-        SET preco = EXCLUDED.preco, data_ref = EXCLUDED.data_ref, updated_at = NOW()
-    """, (ativo, preco, date.fromisoformat(data_ref)))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"ok": True, "ativo": ativo, "preco": preco}
 
 @app.put("/api/cdi")
 def upsert_cdi(mes: str, taxa: float):
@@ -1328,99 +1317,6 @@ def get_pesos_reais():
         raise HTTPException(500, str(e))
 
 
-def calcular_pesos_reais(data: date) -> dict:
-    """
-    Calcula os pesos reais de cada ativo com base nos preços do dia anterior.
-    Retorna {ativo: peso_real} onde a soma é ~1.0
-    """
-    carteira = get_carteira_vigente(data)
-    if not carteira:
-        return {}
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    # Busca o último preço de cada ativo antes da data
-    precos = {}
-    usdbrl_row = None
-
-    cur.execute("""
-        SELECT preco FROM precos_ativos
-        WHERE ativo = 'USDBRL' AND data < %s
-        ORDER BY data DESC LIMIT 1
-    """, (data,))
-    fx_row = cur.fetchone()
-    usdbrl = float(fx_row['preco']) if fx_row else 1.0
-
-    ativos_usd = {
-        "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
-        "Bitcoin","Swedish Gov Bond","Siemens Bond"
-    }
-
-    valores = {}
-    for ativo, peso_meta in carteira.items():
-        cur.execute("""
-            SELECT preco FROM precos_ativos
-            WHERE ativo = %s AND data < %s
-            ORDER BY data DESC LIMIT 1
-        """, (ativo, data))
-        row = cur.fetchone()
-        if row:
-            preco = float(row['preco'])
-            # Converte USD → BRL se necessário
-            val = preco * usdbrl if ativo in ativos_usd else preco
-            valores[ativo] = val * peso_meta  # valor proporcional ao peso meta inicial
-        else:
-            valores[ativo] = peso_meta  # fallback: usa peso meta
-
-    cur.close()
-    conn.close()
-
-    total = sum(valores.values())
-    if total == 0:
-        return {a: p for a, p in carteira.items()}
-
-    return {ativo: round(val / total, 6) for ativo, val in valores.items()}
-
-
-@app.get("/api/pesos-reais")
-def get_pesos_reais_endpoint(data_str: Optional[str] = None):
-    """
-    Retorna pesos meta e pesos reais de cada ativo.
-    Inclui desvio e alerta se desvio > 3pp.
-    """
-    try:
-        data = date.fromisoformat(data_str) if data_str else date.today()
-        carteira = get_carteira_vigente(data)
-        pesos_reais = calcular_pesos_reais(data)
-
-        resultado = []
-        for ativo, peso_meta in carteira.items():
-            peso_real = pesos_reais.get(ativo, peso_meta)
-            desvio = peso_real - peso_meta
-            alerta = abs(desvio) >= 0.03  # alerta se desvio >= 3pp
-
-            resultado.append({
-                "ativo": ativo,
-                "peso_meta": round(peso_meta, 4),
-                "peso_real": round(peso_real, 4),
-                "desvio": round(desvio, 4),
-                "alerta": alerta,
-            })
-
-        # Ordena por desvio absoluto (maiores desvios primeiro)
-        resultado.sort(key=lambda x: abs(x['desvio']), reverse=True)
-
-        alertas = [r for r in resultado if r['alerta']]
-
-        return {
-            "data": str(data),
-            "ativos": resultado,
-            "num_alertas": len(alertas),
-            "alertas": alertas,
-        }
-    except Exception as e:
-        raise HTTPException(500, str(e))
 
 
 @app.post("/api/preco-manual")
@@ -1458,100 +1354,76 @@ def batimento_historico(payload: dict):
         if not data_str:
             raise HTTPException(400, "data obrigatoria")
         data_obj = date.fromisoformat(data_str)
-
         conn = get_conn()
         cur  = conn.cursor()
-
-        # Carteira vigente nessa data
         carteira = get_carteira_vigente(data_obj)
-
-        # Cota do dia anterior
         cur.execute("""
             SELECT cota FROM cotas_diarias
             WHERE data < %s ORDER BY data DESC LIMIT 1
         """, (data_obj,))
         row_ant = cur.fetchone()
         cota_anterior = float(row_ant['cota']) if row_ant else 1.0
-
-        # Calcula retorno com precos do banco
-        retorno_total = 0.0
         ativos_usd = {
             "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
             "Bitcoin","Swedish Gov Bond","Siemens Bond","CURY3"
         }
-
-        # Cambio do dia
         cur.execute("""
             SELECT preco FROM precos_ativos
-            WHERE ativo = 'USDBRL' AND data <= %s
-            ORDER BY data DESC LIMIT 1
+            WHERE ativo = 'USDBRL' AND data <= %s ORDER BY data DESC LIMIT 1
         """, (data_obj,))
-        fx_row = cur.fetchone()
-        usdbrl_hoje = float(fx_row['preco']) if fx_row else None
-
+        fx_h = cur.fetchone()
+        usdbrl_h = float(fx_h['preco']) if fx_h else None
         cur.execute("""
             SELECT preco FROM precos_ativos
-            WHERE ativo = 'USDBRL' AND data < %s
-            ORDER BY data DESC LIMIT 1
+            WHERE ativo = 'USDBRL' AND data < %s ORDER BY data DESC LIMIT 1
         """, (data_obj,))
-        fx_ant_row = cur.fetchone()
-        usdbrl_ant = float(fx_ant_row['preco']) if fx_ant_row else None
-
+        fx_a = cur.fetchone()
+        usdbrl_a = float(fx_a['preco']) if fx_a else None
+        retorno_total = 0.0
         for ativo, peso in carteira.items():
             cur.execute("""
                 SELECT preco FROM precos_ativos
-                WHERE ativo = %s AND data <= %s
-                ORDER BY data DESC LIMIT 1
+                WHERE ativo = %s AND data <= %s ORDER BY data DESC LIMIT 1
             """, (ativo, data_obj))
-            p_hoje = cur.fetchone()
-
+            ph_row = cur.fetchone()
             cur.execute("""
                 SELECT preco FROM precos_ativos
-                WHERE ativo = %s AND data < %s
-                ORDER BY data DESC LIMIT 1
+                WHERE ativo = %s AND data < %s ORDER BY data DESC LIMIT 1
             """, (ativo, data_obj))
-            p_ant = cur.fetchone()
-
-            if not p_hoje or not p_ant:
+            pa_row = cur.fetchone()
+            if not ph_row or not pa_row:
                 continue
-
-            ph = float(p_hoje['preco'])
-            pa = float(p_ant['preco'])
+            ph = float(ph_row['preco'])
+            pa = float(pa_row['preco'])
             if pa <= 0:
                 continue
-
-            if ativo in ativos_usd and usdbrl_hoje and usdbrl_ant and usdbrl_ant > 0:
-                ret = (ph * usdbrl_hoje) / (pa * usdbrl_ant) - 1
+            if ativo in ativos_usd and usdbrl_h and usdbrl_a and usdbrl_a > 0:
+                ret = (ph * usdbrl_h) / (pa * usdbrl_a) - 1
             else:
                 ret = ph / pa - 1
-
             retorno_total += peso * ret
-
         nova_cota = round(cota_anterior * (1 + retorno_total), 10)
         pl_novo   = round(nova_cota * 10_000_000, 2)
-
         cur.execute("""
             INSERT INTO cotas_diarias (data, cota, retorno_dia, pl)
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (data) DO UPDATE
-            SET cota = EXCLUDED.cota,
-                retorno_dia = EXCLUDED.retorno_dia,
-                pl = EXCLUDED.pl
+            SET cota=EXCLUDED.cota, retorno_dia=EXCLUDED.retorno_dia, pl=EXCLUDED.pl
         """, (data_obj, nova_cota, retorno_total, pl_novo))
         conn.commit()
         cur.close()
         conn.close()
-
-        return {
-            "data": data_str,
-            "cota": nova_cota,
-            "retorno": retorno_total,
-            "pl": pl_novo
-        }
+        return {"data": data_str, "cota": nova_cota, "retorno": retorno_total, "pl": pl_novo}
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, str(e))
+
+@app.get("/ping")
+def ping():
+    """Keep-alive para Render free tier."""
+    return {"pong": True}
+
 
 @app.get("/api/status")
 def get_status():
