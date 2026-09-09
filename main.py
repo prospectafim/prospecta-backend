@@ -1205,6 +1205,15 @@ def get_atribuicao(mes: str):
             """, (ativo, mes_inicio))
             row_i = cur.fetchone()
 
+            # Ativo entrou no mes (sem preco anterior): usa primeiro preco do mes
+            if not row_i:
+                cur.execute("""
+                    SELECT preco, data FROM precos_ativos
+                    WHERE ativo = %s AND data >= %s AND data <= %s
+                    ORDER BY data ASC LIMIT 1
+                """, (ativo, mes_inicio, data_fim))
+                row_i = cur.fetchone()
+
             # Preco no fim do mes
             cur.execute("""
                 SELECT preco, data FROM precos_ativos
