@@ -107,6 +107,13 @@ CARTEIRAS = [
         "CPER":0.025,"CORN":0.025,"CANE":0.020,
         "URNM":0.020,"REMX":0.020,"Bitcoin":0.010,
     }),
+    (date(2026, 9, 3), {
+        "LFT 2031":0.240,"NTN-B 2029":0.195,"NTN-B 2035":0.145,
+        "STIP":0.070,"IAU":0.050,"IVV":0.040,
+        "BOVA11":0.050,"UTLL11":0.040,"RAIL3":0.020,"CURY3":0.030,
+        "CPER":0.025,"CORN":0.025,
+        "URNM":0.020,"REMX":0.020,"Bitcoin":0.010,
+    }),
 ]
 
 # Futuros/derivativos
@@ -116,9 +123,11 @@ FUTUROS = {
     "DI1F31":   {
         "entrada": date(2026, 9, 3), "long": False, "notional": None,
         "preco_ref": "DI1F31", "tipo": "DI_futuro",
-        "contratos": 50, "pu_entrada": 56639.60, "taxa_entrada": 14.17,
-        "vencimento": date(2031, 1, 2), "dv01": 12177,
-        "tese": "Fechamento de 50bps — subposicionamento em RF + momentum político Flávio Bolsonaro"
+        "contratos": 25, "pu_entrada": 56639.60, "taxa_entrada": 14.17,
+        "taxa_atual": 13.95, "contratos_originais": 50,
+        "parcial_data": date(2026, 9, 8), "parcial_taxa": 13.95, "parcial_contratos": 25,
+        "vencimento": date(2031, 1, 2), "dv01": 6088,
+        "tese": "Fechamento de 50bps — subposicionamento em RF + momentum político Flávio Bolsonaro. Metade realizada em 08/09 a 13,95% (+22bps)."
     },
 }
 
