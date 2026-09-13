@@ -127,15 +127,6 @@ CARTEIRAS = [
 FUTUROS = {
     "EUR/BRL":  {"entrada": date(2026, 4, 24), "long": False, "notional": 0.08,  "preco_ref": "EURUSD"},
     "MXN/CAD":  {"entrada": date(2026, 4, 27), "long": True,  "notional": 0.03,  "preco_ref": "MXNCAD"},
-    "DI1F31":   {
-        "entrada": date(2026, 9, 3), "long": False, "notional": None,
-        "preco_ref": "DI1F31", "tipo": "DI_futuro",
-        "contratos": 25, "pu_entrada": 56639.60, "taxa_entrada": 14.17,
-        "taxa_atual": 13.95, "contratos_originais": 50,
-        "parcial_data": date(2026, 9, 8), "parcial_taxa": 13.95, "parcial_contratos": 25,
-        "vencimento": date(2031, 1, 2), "dv01": 6088,
-        "tese": "Fechamento de 50bps — subposicionamento em RF + momentum político Flávio Bolsonaro. Metade realizada em 08/09 a 13,95% (+22bps)."
-    },
 }
 
 # ─────────────────────────────────────────────
