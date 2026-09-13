@@ -331,94 +331,78 @@ def get_anbima_token() -> Optional[str]:
 
 def fetch_anbima_pu(data_ref: date) -> dict:
     """
-    Calcula PUs dos Tesouros via BCB API:
-    - LFT: PU cresce pela Selic over diária (formula exata)
-    - NTN-B: VNA cresce pelo IPCA diário (projetado via BCB)
+    Calcula PUs dos Tesouros via BCB API (Selic over diária).
+    LFT: PU_hoje = PU_ontem * (1 + taxa_selic_dia/100)
+    NTN-B: idem como proxy conservador
     """
     precos = {}
 
     try:
-        # ── LFT 2031: PU = PU_anterior × (1 + Selic_over_dia/100) ──
-        # Busca Selic over do dia (serie 11 BCB)
-        data_str = data_ref.strftime("%d/%m/%Y")
-        r_selic = requests.get(
+        # ── Busca taxa Selic over do dia via BCB ──
+        # Serie 11 = Selic over diária (% ao dia)
+        data_br = data_ref.strftime("%d/%m/%Y")
+        url_selic = (
             f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.11/dados"
-            f"?formato=json&dataInicial={data_str}&dataFinal={data_str}",
-            timeout=10
+            f"?formato=json&dataInicial={data_br}&dataFinal={data_br}"
         )
+        r_selic = requests.get(url_selic, timeout=10)
+
+        taxa_selic = None
         if r_selic.status_code == 200:
             selic_data = r_selic.json()
-            if selic_data:
-                taxa_selic_dia = float(selic_data[0]['valor']) / 100
+            if selic_data and len(selic_data) > 0:
+                taxa_selic = float(selic_data[0]['valor'])
+                logger.info(f"BCB Selic {data_ref}: {taxa_selic}% ao dia")
 
-                # Busca ultimo PU da LFT no banco
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute("""
-                    SELECT preco FROM precos_ativos
-                    WHERE ativo = 'LFT 2031' AND data < %s
-                    ORDER BY data DESC LIMIT 1
-                """, (data_ref,))
-                row = cur.fetchone()
-                cur.close()
-                conn.close()
+        # Se nao encontrou a taxa do dia (fim de semana, feriado),
+        # busca a ultima taxa disponivel
+        if taxa_selic is None:
+            r_selic2 = requests.get(
+                "https://api.bcb.gov.br/dados/serie/bcdata.sgs.11/dados/ultimos/1?formato=json",
+                timeout=10
+            )
+            if r_selic2.status_code == 200:
+                dados = r_selic2.json()
+                if dados:
+                    taxa_selic = float(dados[0]['valor'])
+                    logger.info(f"BCB Selic fallback (ultimo): {taxa_selic}%")
 
-                if row and float(row['preco']) > 0:
-                    pu_ant = float(row['preco'])
-                    # Fator de crescimento diário da Selic
-                    fator = (1 + taxa_selic_dia / 100) ** (1/252) if taxa_selic_dia > 1 else (1 + taxa_selic_dia / 100)
-                    # Selic over ja é taxa diária efetiva
-                    pu_lft = round(pu_ant * (1 + taxa_selic_dia / 100), 6)
-                    precos['LFT 2031'] = pu_lft
-                    logger.info(f"LFT 2031 PU calculado via Selic BCB: {pu_lft} (taxa={taxa_selic_dia}%)")
+        if taxa_selic is None:
+            # Estimativa conservadora: Selic 14% a.a. / 252 dias
+            taxa_selic = 14.0 / 252 / 100 * 100  # ~0.0556% ao dia
+            logger.warning(f"BCB indisponivel — usando taxa estimada {taxa_selic}%")
+
+        # ── Busca PU anterior do banco ──
+        conn = get_conn()
+        cur = conn.cursor()
+
+        for titulo, nome in [('LFT 2031', 'LFT 2031'),
+                              ('NTN-B 2029', 'NTN-B 2029'),
+                              ('NTN-B 2035', 'NTN-B 2035')]:
+            cur.execute("""
+                SELECT preco, data FROM precos_ativos
+                WHERE ativo = %s AND data < %s
+                AND preco > 1000
+                ORDER BY data DESC LIMIT 1
+            """, (nome, data_ref))
+            row = cur.fetchone()
+
+            if row:
+                pu_ant = float(row['preco'])
+                data_ant = row['data']
+                # Calcula quantos dias uteis passaram para compor corretamente
+                # (simplificado: aplica 1 vez a taxa — ok para dias consecutivos)
+                pu_novo = round(pu_ant * (1 + taxa_selic / 100), 6)
+                precos[nome] = pu_novo
+                logger.info(f"{nome}: {pu_ant} ({data_ant}) → {pu_novo} (+{taxa_selic}%)")
+            else:
+                logger.warning(f"{nome}: sem PU anterior no banco para {data_ref}")
+
+        cur.close()
+        conn.close()
+
     except Exception as e:
-        logger.warning(f"LFT BCB calc: {e}")
-
-    try:
-        # ── NTN-B: VNA cresce com IPCA ──
-        # Busca VNA atual da NTN-B via BCB (série 13521 = VNA NTN-B)
-        r_vna = requests.get(
-            "https://api.bcb.gov.br/dados/serie/bcdata.sgs.13521/dados/ultimos/2?formato=json",
-            timeout=10
-        )
-        if r_vna.status_code == 200:
-            vna_data = r_vna.json()
-            if vna_data:
-                vna_atual = float(vna_data[-1]['valor'])
-                # Para NTN-B, PU = VNA × Fator_cupom_e_taxa
-                # Sem a taxa de mercado, usamos o último PU ajustado pelo VNA
-                conn = get_conn()
-                cur = conn.cursor()
-
-                for titulo in ['NTN-B 2029', 'NTN-B 2035']:
-                    cur.execute("""
-                        SELECT preco, data FROM precos_ativos
-                        WHERE ativo = %s AND data < %s
-                        ORDER BY data DESC LIMIT 1
-                    """, (titulo, data_ref))
-                    row_b = cur.fetchone()
-
-                    if row_b and float(row_b['preco']) > 0:
-                        # Busca VNA na data do último preço
-                        data_ult = str(row_b['data'])
-                        data_ult_str = f"{data_ult[8:10]}/{data_ult[5:7]}/{data_ult[:4]}"
-                        r_vna_ant = requests.get(
-                            f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.13521/dados"
-                            f"?formato=json&dataInicial={data_ult_str}&dataFinal={data_ult_str}",
-                            timeout=10
-                        )
-                        if r_vna_ant.status_code == 200 and r_vna_ant.json():
-                            vna_ant = float(r_vna_ant.json()[0]['valor'])
-                            if vna_ant > 0:
-                                fator_vna = vna_atual / vna_ant
-                                pu_novo = round(float(row_b['preco']) * fator_vna, 6)
-                                precos[titulo] = pu_novo
-                                logger.info(f"{titulo} PU atualizado via VNA BCB: {pu_novo}")
-
-                cur.close()
-                conn.close()
-    except Exception as e:
-        logger.warning(f"NTN-B VNA BCB calc: {e}")
+        logger.error(f"fetch_anbima_pu error: {e}")
 
     return precos
 
@@ -706,7 +690,22 @@ def run_batimento(data: date = None):
         precos_hoje = {**yahoo_precos, **tesouro_precos, **manuais}
         conn = get_conn()
         cur = conn.cursor()
+        TESOUROS = {'LFT 2031', 'NTN-B 2029', 'NTN-B 2035', 'LTN 2032'}
         for ativo, preco in precos_hoje.items():
+            # Rejeita PUs de Tesouros claramente errados (< 1000)
+            if ativo in TESOUROS and float(preco) < 1000:
+                logger.warning(f"PU invalido rejeitado: {ativo} = {preco}")
+                continue
+            # Rejeita PU identico ao ultimo salvo (congelado = nao calculado)
+            if ativo in TESOUROS:
+                cur.execute("""
+                    SELECT preco FROM precos_ativos
+                    WHERE ativo = %s ORDER BY data DESC LIMIT 1
+                """, (ativo,))
+                last = cur.fetchone()
+                if last and abs(float(last['preco']) - float(preco)) < 0.01:
+                    logger.warning(f"PU congelado rejeitado: {ativo} = {preco} (igual ao anterior)")
+                    continue
             fonte = "yahoo" if ativo in yahoo_precos else ("tesouro" if ativo in tesouro_precos else "manual")
             cur.execute("""
                 INSERT INTO precos_ativos (data, ativo, preco, fonte)
