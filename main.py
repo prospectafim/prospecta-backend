@@ -1441,6 +1441,37 @@ def ping():
     return {"pong": True}
 
 
+
+@app.post("/api/cota-manual")
+def inserir_cota_manual(payload: dict):
+    """Insere ou sobrescreve uma cota manualmente (ex: ajuste de P&L de derivativo)."""
+    try:
+        data_str  = payload.get("data")
+        cota      = payload.get("cota")
+        retorno   = payload.get("retorno_dia")
+        pl        = payload.get("pl")
+        if not data_str or cota is None:
+            raise HTTPException(400, "data e cota sao obrigatorios")
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute("""
+            INSERT INTO cotas_diarias (data, cota, retorno_dia, pl)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (data) DO UPDATE
+            SET cota=EXCLUDED.cota,
+                retorno_dia=EXCLUDED.retorno_dia,
+                pl=EXCLUDED.pl
+        """, (data_str, float(cota), float(retorno) if retorno else None,
+              float(pl) if pl else None))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"ok": True, "data": data_str, "cota": cota}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 @app.get("/api/status")
 def get_status():
     """Retorna status do sistema e última atualização."""
