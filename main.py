@@ -657,9 +657,15 @@ def run_batimento(data: date = None):
     """
     Executa o batimento de cotas para uma data.
     Busca preços, calcula retorno ponderado, salva nova cota.
+    Ignora fins de semana automaticamente.
     """
     if data is None:
         data = date.today()
+
+    # Pula fins de semana — mercado fechado, PUs nao mudam
+    if data.weekday() >= 5:  # 5=sábado, 6=domingo
+        logger.info(f"Batimento ignorado — fim de semana: {data}")
+        return
 
     logger.info(f"=== Batimento: {data} ===")
 
