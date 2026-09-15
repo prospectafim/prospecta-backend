@@ -1242,6 +1242,41 @@ def get_atribuicao(mes: str):
                 })
                 continue
 
+            # ── Valida PUs de Tesouros ──
+            # Se pf == pi (congelado) ou pf == 19412.15 (valor antigo),
+            # recalcula usando Selic acumulada do período
+            TESOUROS_SET = {"LFT 2031", "NTN-B 2029", "NTN-B 2035", "LTN 2032"}
+            if ativo in TESOUROS_SET and (abs(pf - pi) < 1.0 or abs(pf - 19412.15) < 1.0):
+                try:
+                    # Busca Selic acumulada do período via BCB
+                    from datetime import datetime
+                    d_ini = date.fromisoformat(data_inicio)
+                    d_fim = date.fromisoformat(data_fim)
+                    d_ini_br = d_ini.strftime("%d/%m/%Y")
+                    d_fim_br = d_fim.strftime("%d/%m/%Y")
+                    r_s = requests.get(
+                        f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.11/dados"
+                        f"?formato=json&dataInicial={d_ini_br}&dataFinal={d_fim_br}",
+                        timeout=8
+                    )
+                    if r_s.status_code == 200 and r_s.json():
+                        fator = 1.0
+                        for item in r_s.json():
+                            fator *= (1 + float(item["valor"]) / 100)
+                        # Busca PU correto antes do inicio do mes
+                        cur.execute("""
+                            SELECT preco FROM precos_ativos
+                            WHERE ativo = %s AND data < %s AND preco > 1000
+                            ORDER BY data DESC LIMIT 1
+                        """, (ativo, mes_inicio))
+                        row_pi_corr = cur.fetchone()
+                        if row_pi_corr:
+                            pi = float(row_pi_corr["preco"])
+                            pf = round(pi * fator, 6)
+                            logger.info(f"Atrib {ativo}: PU recalculado via Selic — pi={pi} pf={pf} fator={fator:.6f}")
+                except Exception as e_selic:
+                    logger.warning(f"Atrib Selic recalc {ativo}: {e_selic}")
+
             if ativo in ativos_usd:
                 # Ajusta pelo cambio USD/BRL
                 cur.execute("""
