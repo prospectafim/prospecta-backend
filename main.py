@@ -127,6 +127,17 @@ CARTEIRAS = [
 FUTUROS = {
     "EUR/BRL":  {"entrada": date(2026, 4, 24), "long": False, "notional": 0.08,  "preco_ref": "EURUSD"},
     "MXN/CAD":  {"entrada": date(2026, 4, 27), "long": True,  "notional": 0.03,  "preco_ref": "MXNCAD"},
+    "5s10s IRS Steepener": {
+        "entrada": date(2026, 9, 16), "long": True, "notional": 0.126,
+        "tipo": "IRS_steepener",
+        "estrutura": "Receber fixo 5Y USD 9.5M @ 4.79% / Pagar fixo 10Y USD 5.0M @ 4.97%",
+        "spread_entrada_bps": 18, "spread_alvo_bps": 35, "spread_stop_bps": 5,
+        "spread_revisao_bps": 10,
+        "dv01_5y": 4275, "dv01_10y": 4250,
+        "margem_usd": 290000,
+        "tese": "Desaceleração do Fed derruba mais o 5Y; déficit, oferta de Treasuries e term premium sustentam o 10Y. Spread 10Y-5Y abre de 18bps para 35bps em 6 meses.",
+        "prazo": "6 meses",
+    },
 }
 
 # ─────────────────────────────────────────────
