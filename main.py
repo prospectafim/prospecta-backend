@@ -415,6 +415,166 @@ def fetch_tesouro(data: date) -> dict:
     return fetch_anbima_pu(data)
 
 
+
+def get_carteira_vigente(data: date) -> dict:
+    """Retorna a carteira vigente para uma data (ultimo rebalance anterior)."""
+    carteira_vigente = {}
+    for data_inicio, carteira in CARTEIRAS:
+        if data >= data_inicio:
+            carteira_vigente = carteira
+        else:
+            break
+    return carteira_vigente
+
+
+def run_batimento(data: date = None):
+    """
+    Executa o batimento de cotas para uma data.
+    Busca precos, calcula retorno ponderado, salva nova cota.
+    Ignora fins de semana automaticamente.
+    """
+    if data is None:
+        data = date.today()
+
+    # Pula fins de semana
+    if data.weekday() >= 5:
+        logger.info(f"Batimento ignorado — fim de semana: {data}")
+        return
+
+    logger.info(f"=== Batimento: {data} ===")
+
+    today = date.today()
+    is_historical = data < today
+
+    # Busca precos
+    carteira = get_carteira_vigente(data)
+    ativos_yahoo = [t for t in YAHOO_TICKERS.keys()]
+    yahoo_precos_raw = fetch_yahoo(ativos_yahoo, data)
+    yahoo_precos = {YAHOO_TICKERS[k]: v for k, v in yahoo_precos_raw.items() if k in YAHOO_TICKERS}
+
+    tesouro_precos = fetch_tesouro(data)
+
+    manuais = get_precos_manuais()
+    precos_hoje = {**yahoo_precos, **tesouro_precos, **manuais}
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    TESOUROS = {"LFT 2031", "NTN-B 2029", "NTN-B 2035", "LTN 2032"}
+
+    for ativo, preco in precos_hoje.items():
+        # Rejeita PUs de Tesouros claramente errados (< 1000)
+        if ativo in TESOUROS and float(preco) < 1000:
+            logger.warning(f"PU invalido rejeitado: {ativo} = {preco}")
+            continue
+        # Rejeita PU congelado (igual ao anterior para Tesouros)
+        if ativo in TESOUROS:
+            cur.execute("""
+                SELECT preco FROM precos_ativos
+                WHERE ativo = %s ORDER BY data DESC LIMIT 1
+            """, (ativo,))
+            last = cur.fetchone()
+            if last and abs(float(last["preco"]) - float(preco)) < 0.01:
+                logger.warning(f"PU congelado rejeitado: {ativo} = {preco}")
+                continue
+        fonte = "yahoo" if ativo in yahoo_precos else ("tesouro" if ativo in tesouro_precos else "manual")
+        cur.execute("""
+            INSERT INTO precos_ativos (data, ativo, preco, fonte)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (data, ativo) DO UPDATE SET preco = EXCLUDED.preco
+        """, (data, ativo, preco, fonte))
+
+    conn.commit()
+
+    # Calcula retorno do dia
+    cur.execute("""
+        SELECT cota FROM cotas_diarias
+        WHERE data < %s ORDER BY data DESC LIMIT 1
+    """, (data,))
+    row_ant = cur.fetchone()
+    cota_anterior = float(row_ant["cota"]) if row_ant else 1.0
+
+    ativos_usd = {
+        "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
+        "Bitcoin","Swedish Gov Bond","Siemens Bond","CURY3"
+    }
+
+    cur.execute("""
+        SELECT preco FROM precos_ativos
+        WHERE ativo = 'USDBRL' AND data <= %s ORDER BY data DESC LIMIT 1
+    """, (data,))
+    fx_h = cur.fetchone()
+    usdbrl_h = float(fx_h["preco"]) if fx_h else None
+
+    cur.execute("""
+        SELECT preco FROM precos_ativos
+        WHERE ativo = 'USDBRL' AND data < %s ORDER BY data DESC LIMIT 1
+    """, (data,))
+    fx_a = cur.fetchone()
+    usdbrl_a = float(fx_a["preco"]) if fx_a else None
+
+    retorno_total = 0.0
+    for ativo, peso in carteira.items():
+        cur.execute("""
+            SELECT preco FROM precos_ativos
+            WHERE ativo = %s AND data <= %s ORDER BY data DESC LIMIT 1
+        """, (ativo, data))
+        ph = cur.fetchone()
+        cur.execute("""
+            SELECT preco FROM precos_ativos
+            WHERE ativo = %s AND data < %s ORDER BY data DESC LIMIT 1
+        """, (ativo, data))
+        pa = cur.fetchone()
+        if not ph or not pa:
+            continue
+        ph_v = float(ph["preco"])
+        pa_v = float(pa["preco"])
+        if pa_v <= 0:
+            continue
+        if ativo in ativos_usd and usdbrl_h and usdbrl_a and usdbrl_a > 0:
+            ret = (ph_v * usdbrl_h) / (pa_v * usdbrl_a) - 1
+        else:
+            ret = ph_v / pa_v - 1
+        retorno_total += peso * ret
+
+    nova_cota = round(cota_anterior * (1 + retorno_total), 10)
+    pl_novo = round(nova_cota * 10_000_000, 2)
+
+    cur.execute("""
+        INSERT INTO cotas_diarias (data, cota, retorno_dia, pl)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (data) DO UPDATE
+        SET cota=EXCLUDED.cota, retorno_dia=EXCLUDED.retorno_dia, pl=EXCLUDED.pl
+    """, (data, nova_cota, retorno_total, pl_novo))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    logger.info(f"Batimento {data}: cota={nova_cota} retorno={retorno_total:.6f}")
+    return {"data": str(data), "cota": nova_cota, "retorno": retorno_total, "pl": pl_novo}
+
+
+def get_precos_manuais() -> dict:
+    """Busca precos inseridos manualmente (Swedish Bond, Siemens Bond)."""
+    precos = {}
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT ON (ativo) ativo, preco
+            FROM precos_ativos
+            WHERE fonte = 'manual' AND ativo IN ('Swedish Gov Bond', 'Siemens Bond')
+            ORDER BY ativo, data DESC
+        """)
+        for row in cur.fetchall():
+            precos[row["ativo"]] = float(row["preco"])
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"get_precos_manuais: {e}")
+    return precos
+
+
 @app.put("/api/cdi")
 def upsert_cdi(mes: str, taxa: float):
     """
@@ -905,6 +1065,135 @@ def batimento_historico(payload: dict):
         raise
     except Exception as e:
         raise HTTPException(500, str(e))
+
+@app.on_event("startup")
+def startup():
+    if DATABASE_URL:
+        init_db()
+        scheduler = BackgroundScheduler(timezone="America/Sao_Paulo")
+        scheduler.add_job(run_batimento, "cron", hour=18, minute=0)
+        scheduler.start()
+        logger.info("Scheduler started — batimento às 18h todo dia útil")
+
+
+@app.post("/api/batimento")
+def api_batimento(data_str: Optional[str] = None):
+    data = date.fromisoformat(data_str) if data_str else date.today()
+    result = run_batimento(data)
+    if result is None:
+        return {"msg": "fim de semana ignorado"}
+    return result
+
+
+@app.get("/api/metricas")
+def get_metricas():
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT data, cota, retorno_dia, pl FROM cotas_diarias ORDER BY data")
+        rows = cur.fetchall()
+        if not rows:
+            return {}
+        cota_ini = float(rows[0]["cota"])
+        cota_atu = float(rows[-1]["cota"])
+        ret_total = cota_atu / cota_ini - 1 if cota_ini > 0 else 0
+        rets = [float(r["retorno_dia"]) for r in rows if r["retorno_dia"]]
+        vol = (sum((r - sum(rets)/len(rets))**2 for r in rets) / max(len(rets)-1,1))**0.5 * (252**0.5) if rets else 0
+        # Drawdown
+        peak = cota_ini
+        max_dd = 0.0
+        peak_date = str(rows[0]["data"])
+        for r in rows:
+            c = float(r["cota"])
+            if c > peak:
+                peak = c
+                peak_date = str(r["data"])
+            dd = (c - peak) / peak if peak > 0 else 0
+            if dd < max_dd:
+                max_dd = dd
+        # Monthly returns
+        monthly = {}
+        cdi_monthly = {}
+        cur.execute("SELECT mes, taxa FROM cdi_mensal ORDER BY mes")
+        for row in cur.fetchall():
+            cdi_monthly[str(row["mes"])[:7]] = float(row["taxa"])
+        prev_cota = None
+        prev_mes = None
+        for r in rows:
+            mes = str(r["data"])[:7]
+            c = float(r["cota"])
+            if prev_mes and mes != prev_mes:
+                if prev_cota and prev_cota > 0:
+                    monthly[prev_mes] = c / prev_cota - 1
+            prev_mes = mes
+            prev_cota = c
+        cur.close()
+        conn.close()
+        return {
+            "cota_atual": cota_atu,
+            "ret_total": ret_total,
+            "vol_anual": vol,
+            "max_dd": max_dd,
+            "peak_date": peak_date,
+            "pl_atual": float(rows[-1]["pl"]) if rows[-1]["pl"] else cota_atu * 10_000_000,
+            "data_atual": str(rows[-1]["data"]),
+            "monthly": monthly,
+            "cdi_monthly": cdi_monthly,
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/cotas")
+def get_cotas(limit: int = 500):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT data, cota, retorno_dia, pl FROM cotas_diarias ORDER BY data DESC LIMIT %s", (limit,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [{"data": str(r["data"]), "cota": float(r["cota"]),
+                 "retorno_dia": float(r["retorno_dia"]) if r["retorno_dia"] else 0,
+                 "pl": float(r["pl"]) if r["pl"] else None} for r in rows]
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/cota/hoje")
+def get_cota_hoje():
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT data, cota, retorno_dia, pl FROM cotas_diarias ORDER BY data DESC LIMIT 1")
+        r = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not r:
+            return {}
+        return {"data": str(r["data"]), "cota": float(r["cota"]),
+                "retorno_dia": float(r["retorno_dia"]) if r["retorno_dia"] else 0}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/precos/{ativo}")
+def get_precos(ativo: str, limit: int = 30):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT data, preco, fonte FROM precos_ativos
+            WHERE ativo = %s ORDER BY data DESC LIMIT %s
+        """, (ativo, limit))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [{"data": str(r["data"]), "preco": float(r["preco"]),
+                 "fonte": r["fonte"]} for r in rows]
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 
 @app.get("/ping")
 def ping():
