@@ -130,6 +130,17 @@ FUTUROS = {
 }
 
 # ─────────────────────────────────────────────
+# APP
+# ─────────────────────────────────────────────
+app = FastAPI(title="Prospecta FIM Backend")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─────────────────────────────────────────────
 # DATABASE
 # ─────────────────────────────────────────────
 def get_conn():
