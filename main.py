@@ -1145,22 +1145,39 @@ def get_metricas():
             dd = (c - peak) / peak if peak > 0 else 0
             if dd < max_dd:
                 max_dd = dd
-        # Monthly returns
+        # Monthly returns — correto
+        # Para cada mes, pega a primeira e ultima cota e calcula retorno
         monthly = {}
         cdi_monthly = {}
         cur.execute("SELECT mes, taxa FROM cdi_mensal ORDER BY mes")
         for row in cur.fetchall():
             cdi_monthly[str(row["mes"])[:7]] = float(row["taxa"])
-        prev_cota = None
-        prev_mes = None
+
+        # Agrupa cotas por mes
+        from collections import defaultdict
+        cotas_por_mes = defaultdict(list)
         for r in rows:
             mes = str(r["data"])[:7]
-            c = float(r["cota"])
-            if prev_mes and mes != prev_mes:
-                if prev_cota and prev_cota > 0:
-                    monthly[prev_mes] = c / prev_cota - 1
-            prev_mes = mes
-            prev_cota = c
+            cotas_por_mes[mes].append(float(r["cota"]))
+
+        # Calcula retorno de cada mes: ultima_cota / primeira_cota - 1
+        # Mas para mes nao-inicial, referencia e a ultima cota do mes anterior
+        meses_ord = sorted(cotas_por_mes.keys())
+        for i, mes in enumerate(meses_ord):
+            cotas = cotas_por_mes[mes]
+            if not cotas:
+                continue
+            cota_fim = cotas[-1]
+            if i == 0:
+                # Primeiro mes: usa a primeira cota do mes como base
+                cota_ini = cotas[0]
+            else:
+                # Meses seguintes: usa ultima cota do mes anterior
+                mes_ant = meses_ord[i-1]
+                cota_ini = cotas_por_mes[mes_ant][-1]
+            if cota_ini > 0:
+                monthly[mes] = cota_fim / cota_ini - 1
+
         cur.close()
         conn.close()
         return {
