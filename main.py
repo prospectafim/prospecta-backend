@@ -121,12 +121,24 @@ CARTEIRAS = [
         "CPER":0.025,"CANE":0.020,
         "URNM":0.020,"REMX":0.020,"Bitcoin":0.010,
     }),
+    (date(2026, 9, 16), {
+        "LFT 2031":0.240,"NTN-B 2029":0.195,"NTN-B 2035":0.145,
+        "STIP":0.070,"IAU":0.050,"IVV":0.040,
+        "BOVA11":0.080,"UTLL11":0.020,"RAIL3":0.020,"CURY3":0.030,
+        "CPER":0.025,"CANE":0.020,
+        "REMX":0.020,"Bitcoin":0.010,
+    }),
 ]
 
 # Futuros/derivativos
 FUTUROS = {
     "EUR/BRL":  {"entrada": date(2026, 4, 24), "long": False, "notional": 0.08,  "preco_ref": "EURUSD"},
     "MXN/CAD":  {"entrada": date(2026, 4, 27), "long": True,  "notional": 0.03,  "preco_ref": "MXNCAD"},
+    "USD/BRL Long": {
+        "entrada": date(2026, 9, 16), "long": True, "notional": 0.08,
+        "preco_ref": "USDBRL", "tipo": "FX_hedge",
+        "tese": "Hedge eleitoral — proteção contra vitória Lula via long USD/BRL",
+    },
     "5s10s IRS Steepener": {
         "entrada": date(2026, 9, 16), "long": True, "notional": 0.126,
         "tipo": "IRS_steepener",
