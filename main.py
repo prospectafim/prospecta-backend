@@ -61,6 +61,7 @@ YAHOO_TICKERS = {
     "SMAL11.SA":"SMAL11",
     "CURY3.SA": "CURY3",
     "ITUB4.SA": "ITUB4",
+    "RENT3.SA": "RENT3",
 }
 
 # Carteiras históricas: (data, {ativo: peso})
@@ -133,7 +134,7 @@ CARTEIRAS = [
         "LFT 2031":0.240,"NTN-B 2029":0.195,"NTN-B 2035":0.145,
         "STIP":0.040,"IAU":0.030,"IVV":0.040,
         "BOVA11":0.080,"UTLL11":0.020,"RAIL3":0.020,"CURY3":0.030,
-        "ITUB4":0.030,"SMAL11":0.025,
+        "ITUB4":0.030,"SMAL11":0.025,"RENT3":0.030,
         "CPER":0.025,"CANE":0.020,
         "REMX":0.020,"Bitcoin":0.010,
     }),
