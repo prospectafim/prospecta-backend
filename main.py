@@ -138,6 +138,14 @@ CARTEIRAS = [
         "CPER":0.025,"CANE":0.020,
         "REMX":0.020,"Bitcoin":0.010,
     }),
+    (date(2026, 10, 9), {
+        "LFT 2031":0.240,"NTN-B 2029":0.195,"NTN-B 2035":0.145,
+        "STIP":0.030,"IAU":0.030,"IVV":0.040,
+        "BOVA11":0.080,"UTLL11":0.020,"RAIL3":0.020,"CURY3":0.030,
+        "ITUB4":0.020,"SMAL11":0.045,"RENT3":0.030,
+        "CPER":0.025,"CANE":0.020,
+        "REMX":0.020,"Bitcoin":0.010,
+    }),
 ]
 
 # Futuros/derivativos
