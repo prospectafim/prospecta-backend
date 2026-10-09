@@ -786,13 +786,19 @@ def get_atribuicao(mes: str):
     """
     Retorna atribuicao de performance por ativo num mes.
     mes = 'YYYY-MM'
+
+    Calculo por subperiodos: divide o mes nos intervalos definidos pelos
+    rebalanceamentos ocorridos dentro do mes. Para cada subperiodo usa a
+    carteira vigente naquele intervalo, calcula a contribuicao de cada
+    ativo e acumula. Assim o numero bate com o retorno real da cota.
     """
     try:
         conn = get_conn()
         cur = conn.cursor()
 
         ano, m = int(mes[:4]), int(mes[5:7])
-        mes_inicio = f"{ano}-{m:02d}-01"
+        mes_inicio_dt = date(ano, m, 1)
+        mes_inicio    = str(mes_inicio_dt)
         if m == 12:
             mes_fim_dt = date(ano+1, 1, 1)
         else:
@@ -810,10 +816,11 @@ def get_atribuicao(mes: str):
         if not cotas_mes:
             raise HTTPException(404, "Sem cotas para este mes")
 
-        data_inicio = str(cotas_mes[0]['data'])
-        data_fim    = str(cotas_mes[-1]['data'])
+        data_inicio_str = str(cotas_mes[0]['data'])
+        data_fim_str    = str(cotas_mes[-1]['data'])
+        data_fim_dt     = date.fromisoformat(data_fim_str)
 
-        # Cota do ultimo dia do mes anterior (para retorno do mes)
+        # Retorno total do mes via cotas (fonte da verdade)
         cur.execute("""
             SELECT cota FROM cotas_diarias
             WHERE data < %s ORDER BY data DESC LIMIT 1
@@ -823,130 +830,182 @@ def get_atribuicao(mes: str):
         cota_fim    = float(cotas_mes[-1]['cota'])
         ret_total   = cota_fim / cota_inicio - 1 if cota_inicio > 0 else 0
 
-        # Carteira vigente no fim do mes (mais representativa)
-        carteira = get_carteira_vigente(date.fromisoformat(data_fim))
-
         ativos_usd = {
             "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
             "Bitcoin","Swedish Gov Bond","Siemens Bond","CURY3_USD"
         }
+        TESOUROS_SET = {"LFT 2031", "NTN-B 2029", "NTN-B 2035", "LTN 2032"}
 
-        resultado = []
-        for ativo, peso in carteira.items():
-            # Preco no ultimo dia do mes anterior (referencia de inicio)
-            cur.execute("""
-                SELECT preco, data FROM precos_ativos
-                WHERE ativo = %s AND data < %s
-                ORDER BY data DESC LIMIT 1
-            """, (ativo, mes_inicio))
-            row_i = cur.fetchone()
+        # ── Monta subperiodos do mes ──────────────────────────────────────────
+        # Cada rebalanceamento dentro do mes cria uma fronteira de subperiodo.
+        # subperiodos = lista de (data_inicio_sub, data_fim_sub, carteira)
+        # onde data_inicio_sub é exclusive (preco ref) e data_fim_sub é inclusive.
 
-            # Ativo entrou no mes (sem preco anterior): usa primeiro preco do mes
-            if not row_i:
+        # Datas de rebalanceamento dentro do mes (inclusive)
+        datas_rebal_no_mes = sorted([
+            d for d, _ in CARTEIRAS
+            if mes_inicio_dt <= d <= data_fim_dt
+        ])
+
+        # Fronteiras: inicio do mes + cada rebalanceamento no mes
+        fronteiras = [mes_inicio_dt] + datas_rebal_no_mes
+
+        subperiodos = []
+        for i, f_ini in enumerate(fronteiras):
+            f_fim = data_fim_dt  # ultimo subperiodo vai ate o fim do mes
+            if i + 1 < len(fronteiras):
+                # Subperiodo vai ate o dia ANTES do proximo rebalanceamento
+                proximo = fronteiras[i + 1]
+                # Ultimo dia util antes do proximo rebalance
+                f_fim_candidato = proximo - timedelta(days=1)
+                # Avanca para tras ate encontrar dia com cota (pula fins de semana/feriados)
                 cur.execute("""
-                    SELECT preco, data FROM precos_ativos
-                    WHERE ativo = %s AND data >= %s AND data <= %s
-                    ORDER BY data ASC LIMIT 1
-                """, (ativo, mes_inicio, data_fim))
+                    SELECT data FROM cotas_diarias
+                    WHERE data >= %s AND data < %s
+                    ORDER BY data DESC LIMIT 1
+                """, (str(f_ini), str(proximo)))
+                row_ult = cur.fetchone()
+                if not row_ult:
+                    continue  # Sem cotas nesse subperiodo, pula
+                f_fim_sub = row_ult['data']
+            else:
+                f_fim_sub = data_fim_dt
+
+            # Carteira vigente neste subperiodo
+            cart_sub = get_carteira_vigente(f_ini if i == 0 else fronteiras[i])
+
+            subperiodos.append({
+                "ini": f_ini,          # exclusive — preco de referencia
+                "fim": f_fim_sub,       # inclusive
+                "carteira": cart_sub,
+            })
+
+        # ── Acumula contribuicoes por ativo em todos os subperiodos ──────────
+        contrib_por_ativo: dict[str, float] = {}
+        peso_final_por_ativo: dict[str, float] = {}
+
+        # Carteira final (para exibir peso atual)
+        carteira_final = get_carteira_vigente(data_fim_dt)
+        for a in carteira_final:
+            peso_final_por_ativo[a] = carteira_final[a]
+
+        for sp in subperiodos:
+            ini_str = str(sp["ini"])
+            fim_str = str(sp["fim"])
+            cart    = sp["carteira"]
+
+            for ativo, peso in cart.items():
+                # Preco de referencia: ultimo disponivel ANTES do inicio do subperiodo
+                cur.execute("""
+                    SELECT preco FROM precos_ativos
+                    WHERE ativo = %s AND data < %s
+                    ORDER BY data DESC LIMIT 1
+                """, (ativo, ini_str))
                 row_i = cur.fetchone()
 
-            # Preco no fim do mes
-            cur.execute("""
-                SELECT preco, data FROM precos_ativos
-                WHERE ativo = %s AND data <= %s
-                ORDER BY data DESC LIMIT 1
-            """, (ativo, data_fim))
-            row_f = cur.fetchone()
+                # Ativo sem historico antes: usa primeiro preco dentro do subperiodo
+                if not row_i:
+                    cur.execute("""
+                        SELECT preco FROM precos_ativos
+                        WHERE ativo = %s AND data >= %s AND data <= %s
+                        ORDER BY data ASC LIMIT 1
+                    """, (ativo, ini_str, fim_str))
+                    row_i = cur.fetchone()
 
-            if not row_i or not row_f:
-                resultado.append({
-                    "ativo": ativo, "peso": round(peso, 4),
-                    "var_mes": None, "contribuicao": None, "sem_dados": True
-                })
-                continue
-
-            pi = float(row_i['preco'])
-            pf = float(row_f['preco'])
-
-            if pi <= 0:
-                resultado.append({
-                    "ativo": ativo, "peso": round(peso, 4),
-                    "var_mes": None, "contribuicao": None, "sem_dados": True
-                })
-                continue
-
-            # ── Valida PUs de Tesouros ──
-            # Se pf == pi (congelado) ou pf == 19412.15 (valor antigo),
-            # recalcula usando Selic acumulada do período
-            TESOUROS_SET = {"LFT 2031", "NTN-B 2029", "NTN-B 2035", "LTN 2032"}
-            # Tesouros nunca podem ter PU menor que o do mes anterior
-            # Se pf < pi, o PU esta errado (congelado ou valor historico)
-            if ativo in TESOUROS_SET and pf <= pi * 1.0001:
-                try:
-                    # Busca Selic acumulada do período via BCB
-                    from datetime import datetime
-                    d_ini = date.fromisoformat(data_inicio)
-                    d_fim = date.fromisoformat(data_fim)
-                    d_ini_br = d_ini.strftime("%d/%m/%Y")
-                    d_fim_br = d_fim.strftime("%d/%m/%Y")
-                    r_s = requests.get(
-                        f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.11/dados"
-                        f"?formato=json&dataInicial={d_ini_br}&dataFinal={d_fim_br}",
-                        timeout=8
-                    )
-                    if r_s.status_code == 200 and r_s.json():
-                        fator = 1.0
-                        for item in r_s.json():
-                            fator *= (1 + float(item["valor"]) / 100)
-                        # Busca PU correto antes do inicio do mes
-                        cur.execute("""
-                            SELECT preco FROM precos_ativos
-                            WHERE ativo = %s AND data < %s AND preco > 1000
-                            ORDER BY data DESC LIMIT 1
-                        """, (ativo, mes_inicio))
-                        row_pi_corr = cur.fetchone()
-                        if row_pi_corr:
-                            pi = float(row_pi_corr["preco"])
-                            pf = round(pi * fator, 6)
-                            logger.info(f"Atrib {ativo}: PU recalculado via Selic — pi={pi} pf={pf} fator={fator:.6f}")
-                except Exception as e_selic:
-                    logger.warning(f"Atrib Selic recalc {ativo}: {e_selic}")
-
-            if ativo in ativos_usd:
-                # Ajusta pelo cambio USD/BRL
+                # Preco no fim do subperiodo
                 cur.execute("""
                     SELECT preco FROM precos_ativos
-                    WHERE ativo = 'USDBRL' AND data < %s
+                    WHERE ativo = %s AND data <= %s
                     ORDER BY data DESC LIMIT 1
-                """, (mes_inicio,))
-                fx_i = cur.fetchone()
-                cur.execute("""
-                    SELECT preco FROM precos_ativos
-                    WHERE ativo = 'USDBRL' AND data <= %s
-                    ORDER BY data DESC LIMIT 1
-                """, (data_fim,))
-                fx_f = cur.fetchone()
+                """, (ativo, fim_str))
+                row_f = cur.fetchone()
 
-                if fx_i and fx_f and float(fx_i['preco']) > 0:
-                    val_i = pi * float(fx_i['preco'])
-                    val_f = pf * float(fx_f['preco'])
-                    var = val_f / val_i - 1
+                if not row_i or not row_f:
+                    continue
+
+                pi = float(row_i['preco'])
+                pf = float(row_f['preco'])
+                if pi <= 0:
+                    continue
+
+                # Valida PUs de Tesouros congelados — recalcula via Selic
+                if ativo in TESOUROS_SET and pf <= pi * 1.0001:
+                    try:
+                        d_ini_br = sp["ini"].strftime("%d/%m/%Y")
+                        d_fim_br = sp["fim"].strftime("%d/%m/%Y") if hasattr(sp["fim"], "strftime") else date.fromisoformat(fim_str).strftime("%d/%m/%Y")
+                        r_s = requests.get(
+                            f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.11/dados"
+                            f"?formato=json&dataInicial={d_ini_br}&dataFinal={d_fim_br}",
+                            timeout=8
+                        )
+                        if r_s.status_code == 200 and r_s.json():
+                            fator = 1.0
+                            for item in r_s.json():
+                                fator *= (1 + float(item["valor"]) / 100)
+                            cur.execute("""
+                                SELECT preco FROM precos_ativos
+                                WHERE ativo = %s AND data < %s AND preco > 1000
+                                ORDER BY data DESC LIMIT 1
+                            """, (ativo, ini_str))
+                            row_pi_corr = cur.fetchone()
+                            if row_pi_corr:
+                                pi = float(row_pi_corr["preco"])
+                                pf = round(pi * fator, 6)
+                    except Exception as e_selic:
+                        logger.warning(f"Atrib Selic recalc {ativo} [{ini_str}→{fim_str}]: {e_selic}")
+
+                # Calcula variacao do subperiodo
+                if ativo in ativos_usd:
+                    cur.execute("""
+                        SELECT preco FROM precos_ativos
+                        WHERE ativo = 'USDBRL' AND data < %s
+                        ORDER BY data DESC LIMIT 1
+                    """, (ini_str,))
+                    fx_i = cur.fetchone()
+                    cur.execute("""
+                        SELECT preco FROM precos_ativos
+                        WHERE ativo = 'USDBRL' AND data <= %s
+                        ORDER BY data DESC LIMIT 1
+                    """, (fim_str,))
+                    fx_f = cur.fetchone()
+                    if fx_i and fx_f and float(fx_i['preco']) > 0:
+                        val_i = pi * float(fx_i['preco'])
+                        val_f = pf * float(fx_f['preco'])
+                        var_sub = val_f / val_i - 1
+                    else:
+                        var_sub = pf / pi - 1
                 else:
-                    var = pf / pi - 1
-            else:
-                # Tesouros (PU em BRL), acoes BR, etc — direto
-                var = pf / pi - 1
+                    var_sub = pf / pi - 1
 
-            contribuicao = peso * var
+                contrib_sub = peso * var_sub
+                contrib_por_ativo[ativo] = contrib_por_ativo.get(ativo, 0.0) + contrib_sub
+
+        # ── Monta resultado final ─────────────────────────────────────────────
+        # Todos os ativos que apareceram em algum subperiodo
+        todos_ativos = set(contrib_por_ativo.keys())
+
+        # Para exibir var_mes aproximada: contrib / peso_final (ou peso do ultimo subperiodo)
+        resultado = []
+        for ativo in todos_ativos:
+            peso_exib = peso_final_por_ativo.get(ativo)
+            if peso_exib is None:
+                # Ativo saiu da carteira no rebalance — busca ultimo peso
+                for _, cart in reversed(CARTEIRAS):
+                    if ativo in cart:
+                        peso_exib = cart[ativo]
+                        break
+            if peso_exib is None:
+                peso_exib = 0.0
+
+            contrib = contrib_por_ativo[ativo]
+            var_mes_aprox = contrib / peso_exib if peso_exib > 0 else 0.0
 
             resultado.append({
                 "ativo": ativo,
-                "peso": round(peso, 4),
-                "preco_inicio": round(pi, 4),
-                "preco_fim": round(pf, 4),
-                "var_mes": round(var, 6),
-                "contribuicao": round(contribuicao, 6),
-                "sem_dados": False
+                "peso": round(peso_exib, 4),
+                "var_mes": round(var_mes_aprox, 6),
+                "contribuicao": round(contrib, 6),
+                "sem_dados": False,
             })
 
         # Ordena: piores primeiro
@@ -957,8 +1016,8 @@ def get_atribuicao(mes: str):
 
         return {
             "mes": mes,
-            "data_inicio": data_inicio,
-            "data_fim": data_fim,
+            "data_inicio": data_inicio_str,
+            "data_fim": data_fim_str,
             "retorno_mes": round(ret_total, 6),
             "ativos": resultado
         }
