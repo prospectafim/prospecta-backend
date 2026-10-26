@@ -146,6 +146,14 @@ CARTEIRAS = [
         "CPER":0.025,"CANE":0.020,
         "REMX":0.020,"Bitcoin":0.010,
     }),
+    (date(2026, 10, 26), {
+        # Zeragem total de ações BR pós-eleição Lula — stop nos preços de abertura
+        # Tudo realocado em LFT 2031 + aumento hedge USD/BRL para 20%
+        "LFT 2031":0.485,"NTN-B 2029":0.195,"NTN-B 2035":0.145,
+        "STIP":0.030,"IAU":0.030,"IVV":0.040,
+        "CPER":0.025,"CANE":0.020,
+        "REMX":0.020,"Bitcoin":0.010,
+    }),
 ]
 
 # Futuros/derivativos
@@ -153,9 +161,9 @@ FUTUROS = {
     "EUR/BRL":  {"entrada": date(2026, 4, 24), "long": False, "notional": 0.08,  "preco_ref": "EURUSD"},
     "MXN/CAD":  {"entrada": date(2026, 4, 27), "long": True,  "notional": 0.03,  "preco_ref": "MXNCAD"},
     "USD/BRL Long": {
-        "entrada": date(2026, 9, 16), "long": True, "notional": 0.08,
+        "entrada": date(2026, 9, 16), "long": True, "notional": 0.20,
         "preco_ref": "USDBRL", "tipo": "FX_hedge",
-        "tese": "Hedge eleitoral — proteção contra vitória Lula via long USD/BRL",
+        "tese": "Hedge eleitoral — proteção contra vitória Lula via long USD/BRL (ampliado 8%→20% em 26/10/2026)",
     },
     "5s10s IRS Steepener": {
         "entrada": date(2026, 9, 16), "long": True, "notional": 0.126,
