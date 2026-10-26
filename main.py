@@ -541,7 +541,9 @@ def run_batimento(data: date = None):
         cur.execute("""
             INSERT INTO precos_ativos (data, ativo, preco, fonte)
             VALUES (%s, %s, %s, %s)
-            ON CONFLICT (data, ativo) DO UPDATE SET preco = EXCLUDED.preco
+            ON CONFLICT (data, ativo) DO UPDATE
+                SET preco = EXCLUDED.preco, fonte = EXCLUDED.fonte
+                WHERE precos_ativos.fonte <> 'manual'
         """, (data, ativo, preco, fonte))
 
     conn.commit()
