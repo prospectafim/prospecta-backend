@@ -44,6 +44,7 @@ COTA_T0      = 1.0
 
 # Tickers Yahoo Finance → nome interno
 YAHOO_TICKERS = {
+    "AVGO":   "AVGO",
     "IVV":    "IVV",
     "IAU":    "IAU",
     "STIP":   "STIP",
@@ -151,6 +152,13 @@ CARTEIRAS = [
         # Tudo realocado em LFT 2031 + aumento hedge USD/BRL para 20%
         "LFT 2031":0.485,"NTN-B 2029":0.195,"NTN-B 2035":0.145,
         "STIP":0.030,"IAU":0.030,"IVV":0.040,
+        "CPER":0.025,"CANE":0.020,
+        "REMX":0.020,"Bitcoin":0.010,
+    }),
+    (date(2026, 11, 3), {
+        # Entrada em IVV (7,5%) e AVGO (3%) — saída de LFT 2031 (48,5% → 42%)
+        "LFT 2031":0.420,"NTN-B 2029":0.195,"NTN-B 2035":0.145,
+        "STIP":0.030,"IAU":0.030,"IVV":0.075,"AVGO":0.030,
         "CPER":0.025,"CANE":0.020,
         "REMX":0.020,"Bitcoin":0.010,
     }),
@@ -558,7 +566,7 @@ def run_batimento(data: date = None):
 
     ativos_usd = {
         "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
-        "Bitcoin","Swedish Gov Bond","Siemens Bond","CURY3"
+        "Bitcoin","Swedish Gov Bond","Siemens Bond","CURY3","AVGO"
     }
 
     cur.execute("""
@@ -850,7 +858,7 @@ def get_atribuicao(mes: str):
 
         ativos_usd = {
             "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
-            "Bitcoin","Swedish Gov Bond","Siemens Bond","CURY3_USD"
+            "Bitcoin","Swedish Gov Bond","Siemens Bond","CURY3_USD","AVGO"
         }
         TESOUROS_SET = {"LFT 2031", "NTN-B 2029", "NTN-B 2035", "LTN 2032"}
 
@@ -1133,7 +1141,7 @@ def batimento_historico(payload: dict):
         cota_anterior = float(row_ant['cota']) if row_ant else 1.0
         ativos_usd = {
             "IVV","IAU","STIP","URNM","REMX","CPER","CORN","CANE",
-            "Bitcoin","Swedish Gov Bond","Siemens Bond","CURY3"
+            "Bitcoin","Swedish Gov Bond","Siemens Bond","CURY3","AVGO"
         }
         cur.execute("""
             SELECT preco FROM precos_ativos
